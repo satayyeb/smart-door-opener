@@ -31,7 +31,7 @@ static void factory_reset_task(void *unused)
             if (++held_ticks == 1) ESP_LOGW(TAG, "Hold GPIO 0 for 10 seconds to erase configuration");
             if (held_ticks >= 100) {
                 ESP_ERROR_CHECK(door_config_erase());
-                ESP_LOGW(TAG, "Configuration erased; restarting with admin/admin");
+                ESP_LOGW(TAG, "Configuration erased; restarting in setup mode");
                 vTaskDelay(pdMS_TO_TICKS(500));
                 esp_restart();
             }
@@ -56,7 +56,7 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
     ESP_ERROR_CHECK(door_config_init());
     ESP_ERROR_CHECK(door_wifi_start());
-    ESP_ERROR_CHECK(door_web_start());
+    if (!door_config_is_provisioned()) ESP_ERROR_CHECK(door_web_start());
     if (xTaskCreate(factory_reset_task, "factory_reset", 1536, NULL, 2, NULL) != pdPASS)
         ESP_LOGE(TAG, "Could not start factory reset monitor");
     if (door_config_is_provisioned()) {

@@ -1,6 +1,7 @@
 #include "door_wifi.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "door_config.h"
 #include "esp_event.h"
@@ -20,6 +21,7 @@ static const char *TAG = "wifi";
 
 static volatile bool s_connected;
 static volatile bool s_websocket_connected;
+static volatile bool s_selecting_network;
 
 static void status_led_set(bool on)
 {
@@ -46,16 +48,16 @@ static void status_led_task(void *unused)
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)data;
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START && door_config_is_provisioned()) esp_wifi_connect();
-    else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && door_config_is_provisioned()) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START && door_config_is_provisioned() && !s_selecting_network)
+        esp_wifi_connect();
+    else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && door_config_is_provisioned() && !s_selecting_network) {
         s_connected = false;
         s_websocket_connected = false;
         status_led_set(true);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         s_connected = true;
-        const ip_event_got_ip_t *event = data;
-        ESP_LOGI(TAG, "Station connected; config page: http://" IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Station connected; setup page remains disabled after provisioning");
     }
 }
 
@@ -81,14 +83,16 @@ esp_err_t door_wifi_start(void)
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char ap_suffix[9];
+    snprintf(ap_suffix, sizeof(ap_suffix), "%02X%02X%02X%02X", mac[2], mac[3], mac[4], mac[5]);
     char ap_ssid[33];
-    snprintf(ap_ssid, sizeof(ap_ssid), "SmartDoor-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    snprintf(ap_ssid, sizeof(ap_ssid), "SmartDoor-%s", ap_suffix);
     door_config_t saved;
     door_config_get(&saved);
 
     wifi_config_t ap = {0};
     strlcpy((char *)ap.ap.ssid, ap_ssid, sizeof(ap.ap.ssid));
-    strlcpy((char *)ap.ap.password, DOOR_SETUP_AP_PASSWORD, sizeof(ap.ap.password));
+    strlcpy((char *)ap.ap.password, ap_suffix, sizeof(ap.ap.password));
     ap.ap.ssid_len = strlen(ap_ssid);
     ap.ap.channel = 1;
     ap.ap.max_connection = 4;
@@ -96,16 +100,43 @@ esp_err_t door_wifi_start(void)
 
     wifi_config_t sta = {0};
     if (door_config_is_provisioned()) {
-        memcpy(sta.sta.ssid, saved.ssid, strlen(saved.ssid));
-        memcpy(sta.sta.password, saved.wifi_password, strlen(saved.wifi_password));
-        sta.sta.threshold.authmode = saved.wifi_password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        wifi_scan_config_t scan = { .show_hidden = false };
+        s_selecting_network = true;
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        ESP_ERROR_CHECK(esp_wifi_scan_start(&scan, true));
+        uint16_t count = 0;
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&count));
+        wifi_ap_record_t *records = count ? calloc(count, sizeof(*records)) : NULL;
+        int best_rssi = -127;
+        int best = -1;
+        if (records) ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&count, records));
+        for (uint16_t r = 0; r < count; ++r) {
+            for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+                if (saved.ssid[i][0] && !strcmp((char *)records[r].ssid, saved.ssid[i]) && records[r].rssi > best_rssi) {
+                    best_rssi = records[r].rssi;
+                    best = i;
+                }
+            }
+        }
+        free(records);
+        if (best < 0) best = 0;
+        strlcpy((char *)sta.sta.ssid, saved.ssid[best], sizeof(sta.sta.ssid));
+        strlcpy((char *)sta.sta.password, saved.wifi_password[best], sizeof(sta.sta.password));
+        sta.sta.threshold.authmode = saved.wifi_password[best][0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        s_selecting_network = false;
     }
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap));
-    if (door_config_is_provisioned()) ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &sta));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGW(TAG, "Config AP: %s, password: %s, page: http://192.168.4.1",
-             ap_ssid, DOOR_SETUP_AP_PASSWORD);
+    if (door_config_is_provisioned()) {
+        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &sta));
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    } else {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap));
+    }
+    if (!door_config_is_provisioned()) ESP_ERROR_CHECK(esp_wifi_start());
+    if (!door_config_is_provisioned()) {
+        ESP_LOGW(TAG, "Config AP: %s, page: http://192.168.4.1", ap_ssid);
+    }
     if (xTaskCreate(status_led_task, "status_led", 1024, NULL, 2, NULL) != pdPASS)
         return ESP_ERR_NO_MEM;
     return ESP_OK;

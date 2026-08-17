@@ -11,55 +11,21 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "mbedtls/base64.h"
 
 static const char *TAG = "door_web";
 
 static const char STYLE[] =
-"<style>body{font:16px system-ui;background:#111827;color:#e5e7eb;margin:0}main{max-width:560px;margin:4vh auto;padding:20px}"
-"form{background:#1f2937;padding:22px;border-radius:14px}label{display:block;margin:15px 0 6px}"
-"input{box-sizing:border-box;width:100%;padding:11px;border-radius:7px;border:1px solid #4b5563}"
-"button{margin-top:20px;padding:12px 18px;border:0;border-radius:7px;background:#dc2626;color:white;font-weight:700}"
-"small{color:#9ca3af}.warn{color:#fca5a5}.ok{color:#86efac}</style>";
+"<style>:root{color-scheme:light}*{box-sizing:border-box}body{font:16px system-ui,-apple-system,sans-serif;background:#f4f7fb;color:#172033;margin:0}"
+"main{max-width:680px;margin:0 auto;padding:32px 20px 48px}.hero{background:linear-gradient(135deg,#2563eb,#14b8a6);color:#fff;padding:28px;border-radius:20px;box-shadow:0 12px 30px #1720331c}"
+"h1{margin:0 0 8px;font-size:clamp(28px,6vw,42px)}.hero p{margin:0;color:#e0f2fe}.card{background:#fff;padding:24px;margin-top:18px;border:1px solid #dbe3ef;border-radius:16px;box-shadow:0 8px 24px #1720330d}"
+"label{display:block;margin:16px 0 7px;font-weight:650}input{width:100%;padding:12px 13px;border:1px solid #c7d2e2;border-radius:9px;background:#fbfdff;color:#172033;font:inherit}input:focus{outline:3px solid #bfdbfe;border-color:#2563eb}"
+"button{margin-top:22px;padding:13px 19px;border:0;border-radius:9px;background:#2563eb;color:#fff;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#1d4ed8}.hint{color:#52627a}.ok{color:#047857;font-weight:650}small{color:#64748b}</style>";
 
 static esp_err_t send_error(httpd_req_t *request, const char *status, const char *message)
 {
     httpd_resp_set_status(request, status);
     httpd_resp_set_type(request, "text/plain");
     return httpd_resp_send(request, message, -1);
-}
-
-static bool authenticated(httpd_req_t *request)
-{
-    size_t length = httpd_req_get_hdr_value_len(request, "Authorization");
-    if (length < 7 || length > 256) return false;
-    char *header = malloc(length + 1);
-    if (!header || httpd_req_get_hdr_value_str(request, "Authorization", header, length + 1) != ESP_OK) {
-        free(header);
-        return false;
-    }
-    bool ok = false;
-    if (!strncmp(header, "Basic ", 6)) {
-        unsigned char decoded[192];
-        size_t decoded_length = 0;
-        if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_length,
-                                  (unsigned char *)header + 6, length - 6) == 0) {
-            decoded[decoded_length] = '\0';
-            char *colon = strchr((char *)decoded, ':');
-            ok = colon && (size_t)(colon - (char *)decoded) == strlen(DOOR_DEFAULT_USERNAME) &&
-                 !strncmp((char *)decoded, DOOR_DEFAULT_USERNAME, strlen(DOOR_DEFAULT_USERNAME)) &&
-                 door_config_check_password(colon + 1);
-        }
-    }
-    free(header);
-    return ok;
-}
-
-static esp_err_t demand_auth(httpd_req_t *request)
-{
-    httpd_resp_set_status(request, "401 Unauthorized");
-    httpd_resp_set_hdr(request, "WWW-Authenticate", "Basic realm=\"Smart Door\"");
-    return httpd_resp_send(request, "Authentication required", -1);
 }
 
 static void html_escape(const char *input, char *output, size_t size)
@@ -107,8 +73,8 @@ static void url_decode(char *value)
 }
 
 typedef struct {
-    char *ssid;
-    char *wifi_password;
+    char *ssid[DOOR_WIFI_NETWORKS_MAX];
+    char *wifi_password[DOOR_WIFI_NETWORKS_MAX];
     char *websocket_uri;
     char *authorization_token;
     char *password;
@@ -127,9 +93,14 @@ static form_fields_t parse_form(char *body)
             *equals++ = '\0';
             url_decode(part);
             url_decode(equals);
-            if (!strcmp(part, "ssid")) fields.ssid = equals;
-            else if (!strcmp(part, "wifi_password")) fields.wifi_password = equals;
-            else if (!strcmp(part, "websocket_uri")) fields.websocket_uri = equals;
+            for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+                char key[32];
+                snprintf(key, sizeof(key), "ssid%d", i);
+                if (!strcmp(part, key)) fields.ssid[i] = equals;
+                snprintf(key, sizeof(key), "wifi_password%d", i);
+                if (!strcmp(part, key)) fields.wifi_password[i] = equals;
+            }
+            if (!strcmp(part, "websocket_uri")) fields.websocket_uri = equals;
             else if (!strcmp(part, "authorization_token")) fields.authorization_token = equals;
             else if (!strcmp(part, "password")) fields.password = equals;
             else if (!strcmp(part, "confirmation")) fields.confirmation = equals;
@@ -153,77 +124,60 @@ static char *receive_form(httpd_req_t *request)
     return body;
 }
 
-static esp_err_t password_page(httpd_req_t *request)
-{
-    if (!authenticated(request)) return demand_auth(request);
-    const char *page =
-        "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><title>Change password</title>"
-        "<style>body{font:16px system-ui;background:#111827;color:#e5e7eb;margin:0}main{max-width:560px;margin:4vh auto;padding:20px}form{background:#1f2937;padding:22px;border-radius:14px}label{display:block;margin:15px 0 6px}input{box-sizing:border-box;width:100%;padding:11px;border-radius:7px}button{margin-top:20px;padding:12px;background:#dc2626;color:white;border:0;border-radius:7px}.warn{color:#fca5a5}</style>"
-        "</head><body><main><h1>Change the default password</h1><p class=warn>Configuration is locked until the default admin password is replaced.</p>"
-        "<form method=post action=/api/password><label>New password</label><input type=password name=password minlength=8 required autofocus>"
-        "<label>Confirm password</label><input type=password name=confirmation minlength=8 required><button>Change password</button></form>"
-        "</main></body></html>";
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, page, -1);
-}
-
 static esp_err_t root_get(httpd_req_t *request)
 {
-    if (!authenticated(request)) return demand_auth(request);
-    if (door_config_must_change_password()) return password_page(request);
     door_config_t config;
     door_config_get(&config);
-    char ssid[192], uri[1024];
-    html_escape(config.ssid, ssid, sizeof(ssid));
+    char *wifi_fields = calloc(1, 4096);
+    if (!wifi_fields) return send_error(request, "500 Internal Server Error", "Out of memory");
+    for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+        char ssid[192];
+        html_escape(config.ssid[i], ssid, sizeof(ssid));
+        size_t used = strlen(wifi_fields);
+        snprintf(wifi_fields + used, 4096 - used,
+                 "<label>Wi-Fi network %d%s</label><input name=ssid%d maxlength=32%s value='%s'><label>Password</label><input type=password name=wifi_password%d maxlength=64 placeholder='Leave blank for an open network'>",
+                 i + 1, i ? " (optional)" : "", i, i ? "" : " required", ssid, i);
+    }
+    char uri[1024];
     html_escape(config.websocket_uri, uri, sizeof(uri));
     const char *format =
         "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><title>Smart Door</title>%s</head>"
-        "<body><main><h1>Smart Door</h1><p class=ok>Available through the setup AP and home network.</p>"
-        "<form method=post action=/api/config><label>Wi-Fi SSID</label><input name=ssid maxlength=32 required value='%s'>"
-        "<label>Wi-Fi password</label><input type=password name=wifi_password maxlength=64 placeholder='Leave blank to keep current password'>"
-        "<label>WebSocket endpoint</label><input name=websocket_uri maxlength=255 required value='%s' placeholder='wss://example.com/ws'>"
+        "<body><main><section class=hero><h1>Smart Door</h1><p>Configure your door controller and get it online.</p></section><section class=card><p class=ok>Setup mode is active for this initialization only.</p>"
+        "<form method=post action=/api/config>%s"
+        "<label>WebSocket endpoint</label><input name=websocket_uri maxlength=255 required value='%s' placeholder='" DOOR_DEFAULT_WEBSOCKET_URI "'>"
         "<label>Authorization header value</label><input type=password name=authorization_token maxlength=191 placeholder='Leave blank to keep current token'>"
-        "<button>Save and reboot</button></form><p><small>Station: %s &middot; Firmware 3.0.0-esp8266</small></p></main></body></html>";
-    size_t size = strlen(format) + strlen(STYLE) + strlen(ssid) + strlen(uri) + 64;
+        "<button>Save and reboot</button></form><p class=hint><small>After saving, the setup network and this configuration page are disabled until the next factory reset.</small></p><p><small>Station: %s &middot; Firmware 3.0.0-esp8266</small></p></section></main></body></html>";
+    size_t size = strlen(format) + strlen(STYLE) + strlen(wifi_fields) + strlen(uri) + 64;
     char *html = malloc(size);
-    if (!html) return send_error(request, "500 Internal Server Error", "Out of memory");
-    snprintf(html, size, format, STYLE, ssid, uri,
+    if (!html) {
+        free(wifi_fields);
+        return send_error(request, "500 Internal Server Error", "Out of memory");
+    }
+    snprintf(html, size, format, STYLE, wifi_fields, uri,
              door_wifi_station_connected() ? "connected" : "not connected");
     httpd_resp_set_type(request, "text/html");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_send(request, html, -1);
     free(html);
+    free(wifi_fields);
     return err;
-}
-
-static esp_err_t password_post(httpd_req_t *request)
-{
-    if (!authenticated(request)) return demand_auth(request);
-    if (!door_config_must_change_password()) return send_error(request, "403 Forbidden", "Password was already initialized");
-    char *body = receive_form(request);
-    if (!body) return send_error(request, "400 Bad Request", "Invalid form");
-    form_fields_t fields = parse_form(body);
-    bool matches = fields.password && fields.confirmation && !strcmp(fields.password, fields.confirmation);
-    esp_err_t err = matches ? door_config_change_password(fields.password) : ESP_ERR_INVALID_ARG;
-    free(body);
-    if (err != ESP_OK) return send_error(request, "400 Bad Request", "Passwords must match, contain at least 8 characters, and must not be 'admin'.");
-    httpd_resp_set_type(request, "text/html");
-    return httpd_resp_send(request, "<h1>Password changed</h1><p>Close this browser window, reopen the configuration page, and sign in with admin and your new password.</p>", -1);
 }
 
 static esp_err_t config_post(httpd_req_t *request)
 {
-    if (!authenticated(request)) return demand_auth(request);
-    if (door_config_must_change_password()) return send_error(request, "403 Forbidden", "Change the default password first");
     char *body = receive_form(request);
     if (!body) return send_error(request, "400 Bad Request", "Invalid form");
     form_fields_t fields = parse_form(body);
     door_config_t old;
     door_config_get(&old);
-    if (fields.wifi_password && !fields.wifi_password[0]) fields.wifi_password = old.wifi_password;
+    char ssids[DOOR_WIFI_NETWORKS_MAX][DOOR_SSID_MAX + 1] = {0};
+    char passwords[DOOR_WIFI_NETWORKS_MAX][DOOR_WIFI_PASSWORD_MAX + 1] = {0};
+    for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+        if (fields.ssid[i]) strlcpy(ssids[i], fields.ssid[i], sizeof(ssids[i]));
+        if (fields.wifi_password[i]) strlcpy(passwords[i], fields.wifi_password[i], sizeof(passwords[i]));
+    }
     if (fields.authorization_token && !fields.authorization_token[0]) fields.authorization_token = old.authorization_token;
-    esp_err_t err = door_config_save(fields.ssid, fields.wifi_password, fields.websocket_uri,
+    esp_err_t err = door_config_save(ssids, passwords, fields.websocket_uri,
                                      fields.authorization_token);
     free(body);
     if (err != ESP_OK) return send_error(request, "400 Bad Request", "Invalid configuration; check all field lengths and the ws:// or wss:// URI.");
@@ -242,9 +196,7 @@ esp_err_t door_web_start(void)
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) { ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err)); return err; }
     const httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_get };
-    const httpd_uri_t password = { .uri = "/api/password", .method = HTTP_POST, .handler = password_post };
     const httpd_uri_t save = { .uri = "/api/config", .method = HTTP_POST, .handler = config_post };
     if ((err = httpd_register_uri_handler(server, &root)) != ESP_OK) return err;
-    if ((err = httpd_register_uri_handler(server, &password)) != ESP_OK) return err;
     return httpd_register_uri_handler(server, &save);
 }

@@ -39,6 +39,8 @@ esp_err_t door_config_init(void)
         memset(&s_config, 0, sizeof(s_config));
         s_config.version = DOOR_CONFIG_VERSION;
         s_config.must_change_password = true;
+        strlcpy(s_config.websocket_uri, DOOR_DEFAULT_WEBSOCKET_URI,
+                sizeof(s_config.websocket_uri));
         esp_fill_random(s_config.password_salt, sizeof(s_config.password_salt));
         hash_password(s_config.password_salt, DOOR_DEFAULT_PASSWORD, s_config.password_hash);
         nvs_handle_t write_handle = 0;
@@ -47,8 +49,18 @@ esp_err_t door_config_init(void)
         if (err == ESP_OK) err = nvs_commit(write_handle);
         if (write_handle) nvs_close(write_handle);
         if (err != ESP_OK) return err;
+    } else if (!s_config.websocket_uri[0]) {
+        /* Preserve existing unprovisioned devices while giving them the new default. */
+        strlcpy(s_config.websocket_uri, DOOR_DEFAULT_WEBSOCKET_URI,
+                sizeof(s_config.websocket_uri));
+        nvs_handle_t write_handle = 0;
+        err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &write_handle);
+        if (err == ESP_OK) err = nvs_set_blob(write_handle, NVS_CONFIG_KEY, &s_config, sizeof(s_config));
+        if (err == ESP_OK) err = nvs_commit(write_handle);
+        if (write_handle) nvs_close(write_handle);
+        if (err != ESP_OK) return err;
     }
-    s_provisioned = s_config.ssid[0] && s_config.websocket_uri[0];
+    s_provisioned = s_config.ssid[0][0] && s_config.websocket_uri[0];
     return ESP_OK;
 }
 
@@ -60,20 +72,23 @@ void door_config_get(door_config_t *out)
     if (out) memcpy(out, &s_config, sizeof(*out));
 }
 
-esp_err_t door_config_save(const char *ssid, const char *wifi_password,
+esp_err_t door_config_save(const char ssid[][DOOR_SSID_MAX + 1],
+                           const char wifi_password[][DOOR_WIFI_PASSWORD_MAX + 1],
                            const char *websocket_uri, const char *authorization_token)
 {
-    if (!ssid || !ssid[0] || strlen(ssid) > DOOR_SSID_MAX || !wifi_password ||
-        strlen(wifi_password) > DOOR_WIFI_PASSWORD_MAX || !websocket_uri ||
+    if (!ssid || !wifi_password || !ssid[0][0] || !websocket_uri ||
         strlen(websocket_uri) > DOOR_WS_URI_MAX ||
         (strncmp(websocket_uri, "wss://", 6) && strncmp(websocket_uri, "ws://", 5)) ||
         !authorization_token || strlen(authorization_token) > DOOR_TOKEN_MAX ||
-        strchr(authorization_token, '\r') || strchr(authorization_token, '\n') ||
-        s_config.must_change_password) return ESP_ERR_INVALID_ARG;
+        strchr(authorization_token, '\r') || strchr(authorization_token, '\n')) return ESP_ERR_INVALID_ARG;
 
     door_config_t next = s_config;
-    strlcpy(next.ssid, ssid, sizeof(next.ssid));
-    strlcpy(next.wifi_password, wifi_password, sizeof(next.wifi_password));
+    for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+        if (strlen(ssid[i]) > DOOR_SSID_MAX || strlen(wifi_password[i]) > DOOR_WIFI_PASSWORD_MAX)
+            return ESP_ERR_INVALID_ARG;
+        strlcpy(next.ssid[i], ssid[i], sizeof(next.ssid[i]));
+        strlcpy(next.wifi_password[i], wifi_password[i], sizeof(next.wifi_password[i]));
+    }
     strlcpy(next.websocket_uri, websocket_uri, sizeof(next.websocket_uri));
     strlcpy(next.authorization_token, authorization_token, sizeof(next.authorization_token));
 

@@ -9,11 +9,12 @@ project and must not be built with a normal modern ESP-IDF installation.
 
 ## Features
 
-- Always-on `SmartDoor-XXXXXX` WPA/WPA2 configuration access point.
-- Configuration page at `http://192.168.4.1` and, after Wi-Fi connection, at the
-  station IP printed on serial.
-- NVS-backed Wi-Fi SSID/password, WebSocket endpoint, authorization header, and
-  salted SHA-256 admin-password hash.
+- One-time `SmartDoor-XXXXXXXX` WPA/WPA2 setup access point, enabled only during
+  initial provisioning or after factory reset.
+- Configuration page at `http://192.168.4.1` during setup only; it is not served
+  after provisioning.
+- NVS-backed list of up to five Wi-Fi SSID/password pairs, WebSocket endpoint,
+  and authorization header.
 - Native ESP8266 RTOS SDK HTTP server and WebSocket transport.
 - `ws://` and certificate-validated `wss://` connections.
 - SNTP clock synchronization before TLS certificate validation.
@@ -29,38 +30,25 @@ project and must not be built with a normal modern ESP-IDF installation.
 
 ## Initial credentials
 
-The requested web credentials are deterministic:
-
-| Purpose | Username | Password |
-|---|---|---|
-| Configuration website | `admin` | `admin` |
-| `SmartDoor-XXXXXX` Wi-Fi AP | — | `adminadmin` |
-
-WPA/WPA2 passwords require at least eight characters, so the AP cannot use the
-five-character `admin` password. The AP key is therefore `adminadmin`.
-
-The default website login can only access the password-change screen. Wi-Fi and
-WebSocket configuration endpoints return `403 Forbidden` until the user changes
-the admin password to a non-default value of at least eight characters. HTTP
-Basic credentials may be cached by the browser; after changing the password,
-close the browser window before signing in again.
+There is no website login. The setup AP uses an eight-character hexadecimal
+password equal to the suffix in its SSID. For example,
+`SmartDoor-A1B2C3D4` uses `A1B2C3D4` as its password.
 
 ## First setup
 
 1. Flash the complete ESP8266 image and open the serial monitor at 115200 baud.
 2. Let the board boot normally. Do not hold GPIO 0 low during reset because that
    selects the ESP8266 serial bootloader.
-3. Join `SmartDoor-XXXXXX` with password `adminadmin`.
-4. Open `http://192.168.4.1` and sign in with `admin` / `admin`.
-5. Replace the default admin password. It must contain at least eight characters.
-6. Close and reopen the browser, then sign in as `admin` with the new password.
-7. Enter the home Wi-Fi details, complete WebSocket URI, and optional
-   `Authorization` header value. Prefer a `wss://` URI.
-8. Save. The board reboots, keeps its configuration AP active, connects to the
+3. Join `SmartDoor-XXXXXXXX` with the same eight hexadecimal characters as its
+   password (for example, `SmartDoor-A1B2C3D4` uses `A1B2C3D4`).
+4. Open `http://192.168.4.1`; no login is required.
+5. Enter one or more home Wi-Fi SSID/password pairs, keep or change the default WebSocket URI
+   (`wss://door.alitayyeb.ir/ws/1`), and enter the optional `Authorization`
+   header value.
+6. Save. The board reboots, disables its setup AP and configuration page, connects to the
    selected Wi-Fi, and starts the outbound WebSocket client.
 
-Passwords and tokens are never written to serial logs. Leaving a Wi-Fi password
-or authorization value blank on later edits retains the stored value.
+Passwords and tokens are never written to serial logs.
 
 ## WebSocket protocol
 
@@ -214,7 +202,7 @@ The firmware has been successfully compiled with ESP8266 RTOS SDK
 
 - To erase only the door configuration, boot normally and then hold GPIO 0 low
   continuously for ten seconds. Releasing it early cancels the operation. The
-  board restarts with `admin` / `admin` and requires another password change.
+  board restarts in setup mode with a newly generated SSID/password pair.
 - Verify relay polarity with the lock disconnected. The code assumes an
   active-high relay on GPIO 12, preloads the inactive level before enabling the
   output, and initializes it before NVS or networking.
@@ -222,12 +210,12 @@ The firmware has been successfully compiled with ESP8266 RTOS SDK
   the ESP8266 is resetting or before firmware configures GPIO 12. Firmware
   cannot control the pin during the ROM bootloader interval, so this resistor is
   required for a hardware guarantee that the relay never powers during reboot.
-- The local configuration site uses HTTP, not HTTPS. The AP traffic is protected
-  by WPA/WPA2, but Basic authentication over the home LAN must be restricted to
-  a trusted network. Do not expose TCP port 80 through the router.
-- The AP password is intentionally fixed at the user's request for predictable
-  setup. Anyone nearby who knows it can join the AP and attempt authentication;
-  the mandatory admin-password change is therefore important.
+- The local configuration site uses HTTP, not HTTPS, and has no login. It exists
+  only on the setup AP during first initialization or after factory reset; it is
+  not reachable on the home LAN after provisioning.
+- The setup AP is enabled only during initial provisioning and after a factory
+  reset. Its eight-character hexadecimal password is the same suffix shown in
+  its SSID.
 - Use a unique, device-scoped server token and enforce authorization and rate
   limiting on the WebSocket server as well as on the device.
 - NVS stores Wi-Fi and server credentials in recoverable form unless flash/NVS
