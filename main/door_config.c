@@ -1,0 +1,125 @@
+#include "door_config.h"
+
+#include <string.h>
+#include "esp_system.h"
+#include "mbedtls/sha256.h"
+#include "nvs.h"
+
+#define NVS_NAMESPACE "door"
+#define NVS_CONFIG_KEY "config"
+
+static door_config_t s_config;
+static bool s_provisioned;
+
+static void hash_password(const uint8_t salt[16], const char *password, uint8_t output[32])
+{
+    mbedtls_sha256_context context;
+    mbedtls_sha256_init(&context);
+    mbedtls_sha256_starts_ret(&context, 0);
+    mbedtls_sha256_update_ret(&context, salt, 16);
+    mbedtls_sha256_update_ret(&context, (const unsigned char *)password, strlen(password));
+    mbedtls_sha256_finish_ret(&context, output);
+    mbedtls_sha256_free(&context);
+}
+
+esp_err_t door_config_init(void)
+{
+    memset(&s_config, 0, sizeof(s_config));
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    size_t size = sizeof(s_config);
+    if (err == ESP_OK) {
+        err = nvs_get_blob(handle, NVS_CONFIG_KEY, &s_config, &size);
+        nvs_close(handle);
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        return err;
+    }
+    bool valid = err == ESP_OK && size == sizeof(s_config) && s_config.version == DOOR_CONFIG_VERSION;
+    if (!valid) {
+        memset(&s_config, 0, sizeof(s_config));
+        s_config.version = DOOR_CONFIG_VERSION;
+        s_config.must_change_password = true;
+        esp_fill_random(s_config.password_salt, sizeof(s_config.password_salt));
+        hash_password(s_config.password_salt, DOOR_DEFAULT_PASSWORD, s_config.password_hash);
+        nvs_handle_t write_handle = 0;
+        err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &write_handle);
+        if (err == ESP_OK) err = nvs_set_blob(write_handle, NVS_CONFIG_KEY, &s_config, sizeof(s_config));
+        if (err == ESP_OK) err = nvs_commit(write_handle);
+        if (write_handle) nvs_close(write_handle);
+        if (err != ESP_OK) return err;
+    }
+    s_provisioned = s_config.ssid[0] && s_config.websocket_uri[0];
+    return ESP_OK;
+}
+
+bool door_config_is_provisioned(void) { return s_provisioned; }
+bool door_config_must_change_password(void) { return s_config.must_change_password; }
+
+void door_config_get(door_config_t *out)
+{
+    if (out) memcpy(out, &s_config, sizeof(*out));
+}
+
+esp_err_t door_config_save(const char *ssid, const char *wifi_password,
+                           const char *websocket_uri, const char *authorization_token)
+{
+    if (!ssid || !ssid[0] || strlen(ssid) > DOOR_SSID_MAX || !wifi_password ||
+        strlen(wifi_password) > DOOR_WIFI_PASSWORD_MAX || !websocket_uri ||
+        strlen(websocket_uri) > DOOR_WS_URI_MAX ||
+        (strncmp(websocket_uri, "wss://", 6) && strncmp(websocket_uri, "ws://", 5)) ||
+        !authorization_token || strlen(authorization_token) > DOOR_TOKEN_MAX ||
+        strchr(authorization_token, '\r') || strchr(authorization_token, '\n') ||
+        s_config.must_change_password) return ESP_ERR_INVALID_ARG;
+
+    door_config_t next = s_config;
+    strlcpy(next.ssid, ssid, sizeof(next.ssid));
+    strlcpy(next.wifi_password, wifi_password, sizeof(next.wifi_password));
+    strlcpy(next.websocket_uri, websocket_uri, sizeof(next.websocket_uri));
+    strlcpy(next.authorization_token, authorization_token, sizeof(next.authorization_token));
+
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) err = nvs_set_blob(handle, NVS_CONFIG_KEY, &next, sizeof(next));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (handle) nvs_close(handle);
+    if (err == ESP_OK) { memcpy(&s_config, &next, sizeof(next)); s_provisioned = true; }
+    return err;
+}
+
+esp_err_t door_config_change_password(const char *new_password)
+{
+    if (!new_password || strlen(new_password) < DOOR_ADMIN_PASSWORD_MIN ||
+        !strcmp(new_password, DOOR_DEFAULT_PASSWORD)) return ESP_ERR_INVALID_ARG;
+    door_config_t next = s_config;
+    esp_fill_random(next.password_salt, sizeof(next.password_salt));
+    hash_password(next.password_salt, new_password, next.password_hash);
+    next.must_change_password = false;
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) err = nvs_set_blob(handle, NVS_CONFIG_KEY, &next, sizeof(next));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (handle) nvs_close(handle);
+    if (err == ESP_OK) memcpy(&s_config, &next, sizeof(next));
+    return err;
+}
+
+bool door_config_check_password(const char *password)
+{
+    if (!password) return false;
+    uint8_t candidate[32];
+    hash_password(s_config.password_salt, password, candidate);
+    unsigned difference = 0;
+    for (size_t i = 0; i < sizeof(candidate); ++i) difference |= candidate[i] ^ s_config.password_hash[i];
+    return difference == 0;
+}
+
+esp_err_t door_config_erase(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) err = nvs_erase_key(handle, NVS_CONFIG_KEY);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (handle) nvs_close(handle);
+    if (err == ESP_OK) { memset(&s_config, 0, sizeof(s_config)); s_provisioned = false; }
+    return err;
+}
