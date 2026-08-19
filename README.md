@@ -86,15 +86,17 @@ server uses a scheme.
 
 ## TLS certificate
 
-[`main/certs/server_root_ca.pem`](main/certs/server_root_ca.pem) currently contains
-the ISRG Root X1 certificate for Let's Encrypt endpoints. Certificate hostname,
-chain, and validity checks remain enabled. Before deploying against a server
-using another certificate authority, replace this file with that server's root
-CA certificate and rebuild. Do not work around a TLS failure by switching to
+[`main/certs/server_root_ca.pem`](main/certs/server_root_ca.pem) contains ISRG
+Root X1 and a directly trusted Let's Encrypt YR1 intermediate. YR1 is required
+because the legacy SDK cannot reliably build the server's newer
+YR1 → Root YR → ISRG Root X1 chain. Rotate this compatibility certificate
+before it expires on **2028-09-02**. Certificate hostname, signature, and
+validity checks remain enabled. Do not work around TLS failures by switching to
 `ws://` or disabling validation on an Internet connection.
 
-The ESP8266 synchronizes its clock using `pool.ntp.org` before initiating TLS.
-DNS, NTP (UDP 123), and the WebSocket destination must therefore be reachable.
+The ESP8266 starts synchronization through `pool.ntp.org`. If NTP is blocked,
+it uses the firmware build time as a safe initial lower bound for TLS while
+continuing to synchronize in the background.
 
 ## Signed firmware updates
 
