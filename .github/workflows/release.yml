@@ -28,8 +28,7 @@ jobs:
 
       - name: Install ESP8266 RTOS SDK
         run: |
-          git clone --depth 1 --recursive --shallow-submodules --branch release/v3.4 https://github.com/espressif/ESP8266_RTOS_SDK.git "$RUNNER_TEMP/ESP8266_RTOS_SDK"
-          git -C "$RUNNER_TEMP/ESP8266_RTOS_SDK" fetch --tags --depth 200
+          git clone --recursive --shallow-submodules --branch release/v3.4 https://github.com/espressif/ESP8266_RTOS_SDK.git "$RUNNER_TEMP/ESP8266_RTOS_SDK"
           "$RUNNER_TEMP/ESP8266_RTOS_SDK/install.sh"
 
       - name: Build firmware
