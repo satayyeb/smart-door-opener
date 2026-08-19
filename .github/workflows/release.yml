@@ -30,6 +30,7 @@ jobs:
         run: |
           git clone --recursive --shallow-submodules --branch release/v3.4 https://github.com/espressif/ESP8266_RTOS_SDK.git "$RUNNER_TEMP/ESP8266_RTOS_SDK"
           "$RUNNER_TEMP/ESP8266_RTOS_SDK/install.sh"
+          "$HOME/.espressif/python_env/rtos3.4_py3.11_env/bin/python" -m pip install 'setuptools<81'
 
       - name: Build firmware
         run: |
