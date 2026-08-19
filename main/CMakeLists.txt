@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "door_captive.c" "door_config.c" "door_control.c" "door_wifi.c"
+idf_component_register(SRCS "main.c" "door_captive.c" "door_config.c" "door_control.c" "door_time.c" "door_wifi.c"
                             "door_web.c" "door_socket.c" "door_ota.c"
                        INCLUDE_DIRS "."
                        EMBED_TXTFILES "certs/server_root_ca.pem" "certs/ota_public_key.pem"

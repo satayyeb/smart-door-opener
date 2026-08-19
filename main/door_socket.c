@@ -9,6 +9,7 @@
 #include "door_config.h"
 #include "door_control.h"
 #include "door_ota.h"
+#include "door_time.h"
 #include "door_wifi.h"
 #include "esp_log.h"
 #include "esp_transport.h"
@@ -18,7 +19,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "http_parser.h"
-#include "lwip/apps/sntp.h"
 
 #define WS_MESSAGE_MAX 1024
 #define WS_CONNECT_TIMEOUT_MS 10000
@@ -64,25 +64,6 @@ static bool parse_url(const char *uri, websocket_url_t *parsed)
         memcpy(parsed->path, uri + start, length + 1);
     } else strlcpy(parsed->path, "/", sizeof(parsed->path));
     return true;
-}
-
-static bool synchronize_clock(void)
-{
-    static bool started;
-    if (!started) {
-        sntp_setoperatingmode(SNTP_OPMODE_POLL);
-        sntp_setservername(0, "pool.ntp.org");
-        sntp_init();
-        started = true;
-    }
-    time_t now = 0;
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        time(&now);
-        if (now > 1704067200) return true; /* 2024-01-01 */
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-    ESP_LOGW(TAG, "Clock is not synchronized; postponing TLS connection");
-    return false;
 }
 
 static bool send_frame(ws_transport_opcodes_t opcode, char *payload, size_t length)
@@ -155,7 +136,7 @@ static void socket_session(const door_config_t *config)
     websocket_url_t url = {0};
     if (s_paused_for_ota) goto done;
     if (!parse_url(config->websocket_uri, &url)) { ESP_LOGE(TAG, "Invalid WebSocket URI"); goto done; }
-    if (url.secure && !synchronize_clock()) goto done;
+    if (url.secure && !door_time_ready()) { ESP_LOGW(TAG, "Clock is unavailable; postponing TLS connection"); goto done; }
     if (s_paused_for_ota) goto done;
 
     /* Standalone SSL transports in ESP8266 RTOS SDK v3.4 have no error_handle,

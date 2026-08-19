@@ -6,6 +6,7 @@
 #include <time.h>
 #include "cJSON.h"
 #include "door_socket.h"
+#include "door_time.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -16,7 +17,6 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/sha256.h"
-#include "lwip/apps/sntp.h"
 
 #define OTA_MANIFEST_URL "https://github.com/satayyeb/smart-door-opener/releases/latest/download/manifest.json"
 #define OTA_SIGNATURE_URL "https://github.com/satayyeb/smart-door-opener/releases/latest/download/manifest.json.sig"
@@ -32,25 +32,6 @@ static uint8_t s_expected_sha256[32];
 extern const unsigned char server_root_ca_start[] asm("_binary_server_root_ca_pem_start");
 extern const unsigned char ota_public_key_start[] asm("_binary_ota_public_key_pem_start");
 extern const unsigned char ota_public_key_end[] asm("_binary_ota_public_key_pem_end");
-
-static bool synchronize_clock(void)
-{
-    static bool started;
-    time_t now; time(&now);
-    if (now > 1704067200) return true;
-    if (!started) {
-        sntp_setoperatingmode(SNTP_OPMODE_POLL);
-        sntp_setservername(0, "pool.ntp.org");
-        sntp_init();
-        started = true;
-    }
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        time(&now);
-        if (now > 1704067200) return true;
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-    return false;
-}
 
 static void set_status(door_ota_state_t state, unsigned progress, const char *message)
 {
@@ -139,7 +120,7 @@ static bool version_is_newer(const char *candidate)
 
 static esp_err_t check_now(void)
 {
-    if (!synchronize_clock()) return ESP_ERR_TIMEOUT;
+    if (!door_time_ready()) return ESP_ERR_TIMEOUT;
     uint8_t *manifest = malloc(OTA_METADATA_MAX);
     uint8_t *signature = malloc(512);
     if (!manifest || !signature) { free(manifest); free(signature); return ESP_ERR_NO_MEM; }
