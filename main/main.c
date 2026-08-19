@@ -1,3 +1,4 @@
+#include "door_captive.h"
 #include "door_config.h"
 #include "door_control.h"
 #include "door_socket.h"
@@ -56,6 +57,7 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
     ESP_ERROR_CHECK(door_config_init());
     ESP_ERROR_CHECK(door_wifi_start());
+    if (!door_config_is_provisioned()) ESP_ERROR_CHECK(door_captive_start());
     ESP_ERROR_CHECK(door_web_start());
     if (xTaskCreate(factory_reset_task, "factory_reset", 1536, NULL, 2, NULL) != pdPASS)
         ESP_LOGE(TAG, "Could not start factory reset monitor");

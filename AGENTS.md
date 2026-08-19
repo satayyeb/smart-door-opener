@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository contains native C firmware for the ESP8266 RTOS SDK `release/v3.4`; it is not a modern ESP-IDF or Arduino project. Application code lives in `main/`: `main.c` initializes hardware and services, while `door_config`, `door_control`, `door_wifi`, `door_web`, `door_socket`, and `door_ota` separate persistence, relay control, networking, panel UI, WebSocket behavior, and signed updates. Keep each module's public declarations in its matching `.h` file. Embedded trust roots are under `main/certs/`. Root-level `sdkconfig.defaults` and `partitions.csv` define build and flash defaults.
+This repository contains native C firmware for the ESP8266 RTOS SDK `release/v3.4`; it is not a modern ESP-IDF or Arduino project. Application code lives in `main/`: `main.c` initializes hardware and services, while `door_captive`, `door_config`, `door_control`, `door_wifi`, `door_web`, `door_socket`, and `door_ota` separate captive setup, persistence, relay control, networking, panel UI, WebSocket behavior, and signed updates. Keep each module's public declarations in its matching `.h` file. Embedded trust roots are under `main/certs/`. Root-level `sdkconfig.defaults` and `partitions.csv` define build and flash defaults.
 
 ## Build, Test, and Development Commands
 

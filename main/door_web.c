@@ -182,14 +182,30 @@ static esp_err_t ota_status_get(httpd_req_t *request)
 static esp_err_t ota_check_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; return door_ota_check() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "OTA is busy"); }
 static esp_err_t ota_start_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; return door_ota_start() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "No verified update is ready"); }
 
+static esp_err_t captive_redirect_get(httpd_req_t *request)
+{
+    if (door_config_is_provisioned()) return send_error(request, "404 Not Found", "Not found");
+    httpd_resp_set_status(request, "302 Found");
+    httpd_resp_set_hdr(request, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, "Open the Smart Door setup page", -1);
+}
+
 esp_err_t door_web_start(void)
 {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.stack_size = 6144; httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.stack_size = 6144; config.max_uri_handlers = 12; httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config); if (err != ESP_OK) { ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err)); return err; }
     const httpd_uri_t routes[] = {
         { .uri = "/", .method = HTTP_GET, .handler = root_get }, { .uri = "/api/config", .method = HTTP_POST, .handler = config_post },
         { .uri = "/api/ota/status", .method = HTTP_GET, .handler = ota_status_get }, { .uri = "/api/ota/check", .method = HTTP_POST, .handler = ota_check_post },
         { .uri = "/api/ota/start", .method = HTTP_POST, .handler = ota_start_post },
+        { .uri = "/generate_204", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/gen_204", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/library/test/success.html", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/connecttest.txt", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_redirect_get },
+        { .uri = "/canonical.html", .method = HTTP_GET, .handler = captive_redirect_get },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) if ((err = httpd_register_uri_handler(server, &routes[i])) != ESP_OK) return err;
     return ESP_OK;

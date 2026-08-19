@@ -11,6 +11,8 @@ project and must not be built with a normal modern ESP-IDF installation.
 
 - One-time open `SmartDoor-XXXXXXXX` setup access point, enabled only during
   initial provisioning or after factory reset.
+- Captive-portal detection redirects newly connected phones and computers to
+  `http://192.168.4.1` automatically.
 - Configuration page at `http://192.168.4.1` during setup and on the station LAN
   after provisioning, with an optional user-configured password.
 - NVS-backed list of up to five Wi-Fi SSID/password pairs, WebSocket endpoint,
@@ -42,8 +44,9 @@ access**. When enabled, the username is `admin`.
 1. Flash the complete ESP8266 image and open the serial monitor at 115200 baud.
 2. Let the board boot normally. Do not hold GPIO 0 low during reset because that
    selects the ESP8266 serial bootloader.
-3. Join the open `SmartDoor-XXXXXXXX` network.
-4. Open `http://192.168.4.1`; no login is required.
+3. Join the open `SmartDoor-XXXXXXXX` network. The operating system should open
+   the setup panel automatically through captive-portal detection.
+4. If the panel does not appear, open `http://192.168.4.1`; no login is required.
 5. Enter one or more home Wi-Fi SSID/password pairs, keep or change the default WebSocket URI
    (`wss://door.alitayyeb.ir/ws/1`), and enter the optional `Authorization`
    header value.
