@@ -28,6 +28,8 @@
 
 static const char *TAG = "door_socket";
 static esp_transport_handle_t s_socket;
+static volatile bool s_paused_for_ota;
+static volatile bool s_session_active;
 
 extern const unsigned char server_root_ca_start[] asm("_binary_server_root_ca_pem_start");
 extern const unsigned char server_root_ca_end[] asm("_binary_server_root_ca_pem_end");
@@ -145,32 +147,37 @@ static bool receive_frame(void)
 
 static void socket_session(const door_config_t *config)
 {
+    s_session_active = true;
     door_wifi_set_websocket_connected(false);
     bool connected = false;
+    esp_transport_list_handle_t transports = NULL;
+    esp_transport_handle_t parent = NULL;
     websocket_url_t url = {0};
-    if (!parse_url(config->websocket_uri, &url)) { ESP_LOGE(TAG, "Invalid WebSocket URI"); return; }
-    if (url.secure && !synchronize_clock()) return;
+    if (s_paused_for_ota) goto done;
+    if (!parse_url(config->websocket_uri, &url)) { ESP_LOGE(TAG, "Invalid WebSocket URI"); goto done; }
+    if (url.secure && !synchronize_clock()) goto done;
+    if (s_paused_for_ota) goto done;
 
     /* Standalone SSL transports in ESP8266 RTOS SDK v3.4 have no error_handle,
      * but the DNS failure path unconditionally copies into it. A transport list
      * owns and assigns the required error buffer, preventing StoreProhibited on
      * an unresolved hostname. */
-    esp_transport_list_handle_t transports = esp_transport_list_init();
-    if (!transports) return;
-    esp_transport_handle_t parent = url.secure ? esp_transport_ssl_init() : esp_transport_tcp_init();
-    if (!parent) { esp_transport_list_destroy(transports); return; }
+    transports = esp_transport_list_init();
+    if (!transports) goto done;
+    parent = url.secure ? esp_transport_ssl_init() : esp_transport_tcp_init();
+    if (!parent) goto done;
     esp_err_t add_err = esp_transport_list_add(transports, parent, url.secure ? "wss-parent" : "ws-parent");
     if (add_err != ESP_OK) {
         esp_transport_destroy(parent);
-        esp_transport_list_destroy(transports);
-        return;
+        parent = NULL;
+        goto done;
     }
     if (url.secure) {
         esp_transport_ssl_set_cert_data(parent, (const char *)server_root_ca_start,
                                         strlen((const char *)server_root_ca_start));
     }
     s_socket = esp_transport_ws_init(parent);
-    if (!s_socket) { esp_transport_list_destroy(transports); return; }
+    if (!s_socket) goto done;
     esp_transport_ws_set_path(s_socket, url.path);
     esp_transport_ws_set_user_agent(s_socket, "smart-door-opener/" FIRMWARE_VERSION);
     char *headers = NULL;
@@ -188,7 +195,7 @@ static void socket_session(const door_config_t *config)
         ESP_LOGI(TAG, "Connected to %s://%s:%d%s", url.secure ? "wss" : "ws", url.host, url.port, url.path);
         door_wifi_set_websocket_connected(true);
         TickType_t last_ping = xTaskGetTickCount();
-        while (door_wifi_station_connected()) {
+        while (door_wifi_station_connected() && !s_paused_for_ota) {
             if (!receive_frame()) break;
             TickType_t now = xTaskGetTickCount();
             if (now - last_ping >= pdMS_TO_TICKS(17000)) {
@@ -198,13 +205,16 @@ static void socket_session(const door_config_t *config)
             }
         }
     } else ESP_LOGW(TAG, "Connection failed; retrying in %d ms", WS_RECONNECT_MS);
+done:
     door_wifi_set_websocket_connected(false);
-
-    /* A failed TLS connect already closes its connection state. */
-    if (connected) esp_transport_close(s_socket);
-    esp_transport_destroy(s_socket);
-    esp_transport_list_destroy(transports);
+    if (s_socket) {
+        /* A failed TLS connect already closes its connection state. */
+        if (connected) esp_transport_close(s_socket);
+        esp_transport_destroy(s_socket);
+    }
+    if (transports) esp_transport_list_destroy(transports);
     s_socket = NULL;
+    s_session_active = false;
 }
 
 static void websocket_task(void *unused)
@@ -212,7 +222,7 @@ static void websocket_task(void *unused)
     (void)unused;
     door_wifi_set_websocket_connected(false);
     for (;;) {
-        if (door_config_is_provisioned() && door_wifi_station_connected()) {
+        if (!s_paused_for_ota && door_config_is_provisioned() && door_wifi_station_connected()) {
             door_config_t config;
             door_config_get(&config);
             socket_session(&config);
@@ -225,4 +235,25 @@ esp_err_t door_socket_start(void)
 {
     BaseType_t result = xTaskCreate(websocket_task, "door_ws", WS_TASK_STACK_SIZE, NULL, 5, NULL);
     return result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+esp_err_t door_socket_pause_for_ota(void)
+{
+    door_socket_request_ota_pause();
+    for (int attempt = 0; attempt < 240; ++attempt) {
+        if (!s_session_active) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    s_paused_for_ota = false;
+    return ESP_ERR_TIMEOUT;
+}
+
+void door_socket_request_ota_pause(void)
+{
+    s_paused_for_ota = true;
+}
+
+void door_socket_resume_after_ota(void)
+{
+    s_paused_for_ota = false;
 }

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include "cJSON.h"
+#include "door_socket.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -172,7 +173,10 @@ static esp_err_t check_now(void)
 static void check_task(void *unused)
 {
     (void)unused;
-    if (check_now() != ESP_OK) set_status(DOOR_OTA_ERROR, 0, "Could not verify the signed update manifest.");
+    esp_err_t err = door_socket_pause_for_ota();
+    if (err == ESP_OK) err = check_now();
+    door_socket_resume_after_ota();
+    if (err != ESP_OK) set_status(DOOR_OTA_ERROR, 0, "Could not verify the signed update manifest.");
     vTaskDelete(NULL);
 }
 
@@ -181,12 +185,22 @@ esp_err_t door_ota_check(void)
     door_ota_status_t status; door_ota_get_status(&status);
     if (status.state == DOOR_OTA_CHECKING || status.state == DOOR_OTA_DOWNLOADING || status.state == DOOR_OTA_VERIFYING) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_CHECKING, 0, "Checking GitHub for signed updates...");
-    return xTaskCreate(check_task, "ota_check", OTA_TASK_STACK_SIZE, NULL, 3, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    esp_err_t err = door_socket_pause_for_ota();
+    if (err != ESP_OK) { set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection."); return err; }
+    if (xTaskCreate(check_task, "ota_check", OTA_TASK_STACK_SIZE, NULL, 3, NULL) != pdPASS) {
+        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 static void update_task(void *unused)
 {
     (void)unused;
+    if (door_socket_pause_for_ota() != ESP_OK) {
+        set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection for a safe update.");
+        vTaskDelete(NULL);
+        return;
+    }
     esp_http_client_config_t config = { .url = s_firmware_url, .cert_pem = (const char *)server_root_ca_start,
                                         .timeout_ms = 15000, .buffer_size = 2048 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -219,6 +233,7 @@ failed:
     if (begun) esp_ota_end(handle);
     if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
     mbedtls_sha256_free(&sha);
+    door_socket_resume_after_ota();
     set_status(DOOR_OTA_ERROR, 0, "Firmware download or verification failed; the current image remains active.");
     vTaskDelete(NULL);
 }
@@ -228,14 +243,23 @@ esp_err_t door_ota_start(void)
     door_ota_status_t status; door_ota_get_status(&status);
     if (status.state != DOOR_OTA_AVAILABLE || !s_firmware_url[0]) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_DOWNLOADING, 0, "Starting firmware download...");
-    return xTaskCreate(update_task, "ota_update", OTA_TASK_STACK_SIZE, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    esp_err_t err = door_socket_pause_for_ota();
+    if (err != ESP_OK) { set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection."); return err; }
+    if (xTaskCreate(update_task, "ota_update", OTA_TASK_STACK_SIZE, NULL, 4, NULL) != pdPASS) {
+        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 static void remote_update_task(void *unused)
 {
     (void)unused;
-    if (check_now() == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_task(NULL);
-    if (s_status.state != DOOR_OTA_UP_TO_DATE) set_status(DOOR_OTA_ERROR, 0, "Remote update check or verification failed.");
+    esp_err_t err = door_socket_pause_for_ota();
+    if (err == ESP_OK) err = check_now();
+    if (err == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_task(NULL);
+    door_socket_resume_after_ota();
+    if (err != ESP_OK && s_status.state != DOOR_OTA_UP_TO_DATE)
+        set_status(DOOR_OTA_ERROR, 0, "Remote update check or verification failed.");
     vTaskDelete(NULL);
 }
 
@@ -244,5 +268,9 @@ esp_err_t door_ota_update_latest(void)
     door_ota_status_t status; door_ota_get_status(&status);
     if (status.state == DOOR_OTA_CHECKING || status.state == DOOR_OTA_DOWNLOADING || status.state == DOOR_OTA_VERIFYING) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_CHECKING, 0, "Backend requested a signed firmware update.");
-    return xTaskCreate(remote_update_task, "ota_remote", OTA_TASK_STACK_SIZE, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    door_socket_request_ota_pause();
+    if (xTaskCreate(remote_update_task, "ota_remote", OTA_TASK_STACK_SIZE, NULL, 4, NULL) != pdPASS) {
+        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
