@@ -47,13 +47,15 @@ static void status_led_task(void *unused)
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    (void)arg; (void)data;
+    (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START && door_config_is_provisioned() && !s_selecting_network)
         esp_wifi_connect();
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && door_config_is_provisioned() && !s_selecting_network) {
+        wifi_event_sta_disconnected_t *event = data;
         s_connected = false;
         s_websocket_connected = false;
         status_led_set(true);
+        ESP_LOGW(TAG, "Station disconnected (reason %u); retrying saved Wi-Fi", event ? event->reason : 0);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         s_connected = true;

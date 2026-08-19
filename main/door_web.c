@@ -84,6 +84,7 @@ static void url_decode(char *value)
 
 typedef struct {
     char *ssid[DOOR_WIFI_NETWORKS_MAX]; char *wifi_password[DOOR_WIFI_NETWORKS_MAX];
+    char *clear_wifi_password[DOOR_WIFI_NETWORKS_MAX];
     char *websocket_uri; char *authorization_token; char *panel_password; char *remove_panel_password;
 } form_fields_t;
 
@@ -98,6 +99,7 @@ static form_fields_t parse_form(char *body)
             for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
                 char key[32]; snprintf(key, sizeof(key), "ssid%d", i); if (!strcmp(part, key)) fields.ssid[i] = equals;
                 snprintf(key, sizeof(key), "wifi_password%d", i); if (!strcmp(part, key)) fields.wifi_password[i] = equals;
+                snprintf(key, sizeof(key), "clear_wifi_password%d", i); if (!strcmp(part, key)) fields.clear_wifi_password[i] = equals;
             }
             if (!strcmp(part, "websocket_uri")) fields.websocket_uri = equals;
             else if (!strcmp(part, "authorization_token")) fields.authorization_token = equals;
@@ -125,8 +127,8 @@ static esp_err_t root_get(httpd_req_t *request)
     char *wifi_fields = calloc(1, 4096); if (!wifi_fields) return send_error(request, "500 Internal Server Error", "Out of memory");
     for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
         char ssid[192]; html_escape(config.ssid[i], ssid, sizeof(ssid)); size_t used = strlen(wifi_fields);
-        snprintf(wifi_fields + used, 4096 - used, "<label>Wi-Fi network %d%s</label><input name=ssid%d maxlength=32%s value='%s'><label>Wi-Fi password</label><input type=password name=wifi_password%d maxlength=64 placeholder='Leave blank for an open network'>",
-                 i + 1, i ? " (optional)" : "", i, i ? "" : " required", ssid, i);
+        snprintf(wifi_fields + used, 4096 - used, "<label>Wi-Fi network %d%s</label><input name=ssid%d maxlength=32%s value='%s'><label>Wi-Fi password</label><input type=password name=wifi_password%d maxlength=64 placeholder='Leave blank to keep saved password'><label><input style='width:auto' type=checkbox name=clear_wifi_password%d value=1> Clear saved password (open network)</label>",
+                 i + 1, i ? " (optional)" : "", i, i ? "" : " required", ssid, i, i);
     }
     char uri[1024]; html_escape(config.websocket_uri, uri, sizeof(uri));
     const char *format =
@@ -159,7 +161,13 @@ static esp_err_t config_post(httpd_req_t *request)
     char *body = receive_form(request); if (!body) return send_error(request, "400 Bad Request", "Invalid form");
     form_fields_t fields = parse_form(body); door_config_t old; door_config_get(&old);
     char ssids[DOOR_WIFI_NETWORKS_MAX][DOOR_SSID_MAX + 1] = {0}, passwords[DOOR_WIFI_NETWORKS_MAX][DOOR_WIFI_PASSWORD_MAX + 1] = {0};
-    for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) { if (fields.ssid[i]) strlcpy(ssids[i], fields.ssid[i], sizeof(ssids[i])); if (fields.wifi_password[i]) strlcpy(passwords[i], fields.wifi_password[i], sizeof(passwords[i])); }
+    for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
+        if (fields.ssid[i]) strlcpy(ssids[i], fields.ssid[i], sizeof(ssids[i]));
+        if (fields.wifi_password[i] && fields.wifi_password[i][0])
+            strlcpy(passwords[i], fields.wifi_password[i], sizeof(passwords[i]));
+        else if (!fields.clear_wifi_password[i] && !strcmp(ssids[i], old.ssid[i]))
+            strlcpy(passwords[i], old.wifi_password[i], sizeof(passwords[i]));
+    }
     if (fields.authorization_token && !fields.authorization_token[0]) fields.authorization_token = old.authorization_token;
     esp_err_t err = door_config_save(ssids, passwords, fields.websocket_uri, fields.authorization_token);
     if (err == ESP_OK && fields.remove_panel_password) err = door_config_set_panel_password("");
