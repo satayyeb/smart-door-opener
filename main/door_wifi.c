@@ -57,7 +57,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         s_connected = true;
-        ESP_LOGI(TAG, "Station connected; setup page remains disabled after provisioning");
+        ESP_LOGI(TAG, "Station connected; panel is available on the LAN");
     }
 }
 
@@ -92,11 +92,10 @@ esp_err_t door_wifi_start(void)
 
     wifi_config_t ap = {0};
     strlcpy((char *)ap.ap.ssid, ap_ssid, sizeof(ap.ap.ssid));
-    strlcpy((char *)ap.ap.password, ap_suffix, sizeof(ap.ap.password));
     ap.ap.ssid_len = strlen(ap_ssid);
     ap.ap.channel = 1;
     ap.ap.max_connection = 4;
-    ap.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    ap.ap.authmode = WIFI_AUTH_OPEN;
 
     wifi_config_t sta = {0};
     if (door_config_is_provisioned()) {
@@ -135,7 +134,7 @@ esp_err_t door_wifi_start(void)
     }
     if (!door_config_is_provisioned()) ESP_ERROR_CHECK(esp_wifi_start());
     if (!door_config_is_provisioned()) {
-        ESP_LOGW(TAG, "Config AP: %s, page: http://192.168.4.1", ap_ssid);
+        ESP_LOGW(TAG, "Open config AP: %s, page: http://192.168.4.1", ap_ssid);
     }
     if (xTaskCreate(status_led_task, "status_led", 1024, NULL, 2, NULL) != pdPASS)
         return ESP_ERR_NO_MEM;

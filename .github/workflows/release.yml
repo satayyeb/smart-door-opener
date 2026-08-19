@@ -1,0 +1,64 @@
+name: Build and release signed firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: 0.1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ESP8266 RTOS SDK
+        run: |
+          git clone --depth 1 --recursive --shallow-submodules --branch release/v3.4 https://github.com/espressif/ESP8266_RTOS_SDK.git "$RUNNER_TEMP/ESP8266_RTOS_SDK"
+          "$RUNNER_TEMP/ESP8266_RTOS_SDK/install.sh"
+
+      - name: Build firmware
+        run: |
+          source "$RUNNER_TEMP/ESP8266_RTOS_SDK/export.sh"
+          idf.py -D PROJECT_VER="$VERSION" build
+          cp build/smart-door-opener.bin smart-door-opener.bin
+
+      - name: Create and sign manifest
+        env:
+          OTA_SIGNING_KEY_B64: ${{ secrets.OTA_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$OTA_SIGNING_KEY_B64"
+          printf '%s' "$OTA_SIGNING_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ota-private.pem"
+          chmod 600 "$RUNNER_TEMP/ota-private.pem"
+          SHA256=$(sha256sum smart-door-opener.bin | cut -d' ' -f1)
+          printf '{"version":"%s","firmware_url":"https://github.com/${{ github.repository }}/releases/download/v%s/smart-door-opener.bin","sha256":"%s"}\n' "$VERSION" "$VERSION" "$SHA256" > manifest.json
+          openssl dgst -sha256 -sign "$RUNNER_TEMP/ota-private.pem" -out manifest.json.sig manifest.json
+          openssl dgst -sha256 -verify main/certs/ota_public_key.pem -signature manifest.json.sig manifest.json
+          rm -f "$RUNNER_TEMP/ota-private.pem"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smart-door-opener-${{ env.VERSION }}
+          path: |
+            smart-door-opener.bin
+            manifest.json
+            manifest.json.sig
+
+      - name: Publish incremental release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" smart-door-opener.bin manifest.json manifest.json.sig --title "Firmware v$VERSION" --generate-notes --latest

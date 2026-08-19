@@ -9,10 +9,10 @@ project and must not be built with a normal modern ESP-IDF installation.
 
 ## Features
 
-- One-time `SmartDoor-XXXXXXXX` WPA/WPA2 setup access point, enabled only during
+- One-time open `SmartDoor-XXXXXXXX` setup access point, enabled only during
   initial provisioning or after factory reset.
-- Configuration page at `http://192.168.4.1` during setup only; it is not served
-  after provisioning.
+- Configuration page at `http://192.168.4.1` during setup and on the station LAN
+  after provisioning, with an optional user-configured password.
 - NVS-backed list of up to five Wi-Fi SSID/password pairs, WebSocket endpoint,
   and authorization header.
 - Native ESP8266 RTOS SDK HTTP server and WebSocket transport.
@@ -23,30 +23,33 @@ project and must not be built with a normal modern ESP-IDF installation.
 - Active-low GPIO 2 status LED: solid while station Wi-Fi is disconnected,
   blinking while Wi-Fi is connected but WebSocket is not, and off while the
   WebSocket is operational.
-- Physical configuration reset by holding GPIO 0 low for ten seconds while the
+- Signed dual-slot OTA updates from the panel, GitHub Releases, or an
+  authenticated backend command, with visible download progress.
+- Physical configuration reset by holding GPIO 0 low for five seconds while the
   firmware is already running.
 - No remote binary-update command. The original unsigned WebSocket OTA mechanism
   allowed a compromised server or token to replace the firmware.
 
-## Initial credentials
+## Initial access
 
-There is no website login. The setup AP uses an eight-character hexadecimal
-password equal to the suffix in its SSID. For example,
-`SmartDoor-A1B2C3D4` uses `A1B2C3D4` as its password.
+The initial `SmartDoor-XXXXXXXX` setup network is open and has no password. It
+is disabled immediately after the first valid configuration is saved. The LAN
+panel also starts without a password; one can be set later under **Panel
+access**. When enabled, the username is `admin`.
 
 ## First setup
 
 1. Flash the complete ESP8266 image and open the serial monitor at 115200 baud.
 2. Let the board boot normally. Do not hold GPIO 0 low during reset because that
    selects the ESP8266 serial bootloader.
-3. Join `SmartDoor-XXXXXXXX` with the same eight hexadecimal characters as its
-   password (for example, `SmartDoor-A1B2C3D4` uses `A1B2C3D4`).
+3. Join the open `SmartDoor-XXXXXXXX` network.
 4. Open `http://192.168.4.1`; no login is required.
 5. Enter one or more home Wi-Fi SSID/password pairs, keep or change the default WebSocket URI
    (`wss://door.alitayyeb.ir/ws/1`), and enter the optional `Authorization`
    header value.
-6. Save. The board reboots, disables its setup AP and configuration page, connects to the
-   selected Wi-Fi, and starts the outbound WebSocket client.
+6. Save. The board reboots, disables its setup AP, connects to the selected
+   Wi-Fi, starts the outbound WebSocket client, and serves the panel on its LAN
+   IP address.
 
 Passwords and tokens are never written to serial logs.
 
@@ -89,6 +92,21 @@ CA certificate and rebuild. Do not work around a TLS failure by switching to
 
 The ESP8266 synchronizes its clock using `pool.ntp.org` before initiating TLS.
 DNS, NTP (UDP 123), and the WebSocket destination must therefore be reachable.
+
+## Signed firmware updates
+
+The panel's **Check for firmware updates** button downloads the latest signed
+manifest from GitHub Releases. It shows check, download, verification, and
+restart progress, and asks for confirmation before installation. The firmware
+verifies the manifest with `main/certs/ota_public_key.pem`, then verifies the
+downloaded image's SHA-256 before selecting the inactive OTA slot. The backend
+can start the same process with the authenticated `update-firmware` WebSocket
+command.
+
+The private signing key is never stored here. GitHub Actions expects it as the
+base64-encoded `OTA_SIGNING_KEY_B64` repository secret. Every push to `main`
+builds version `0.1.<run number>`, signs its manifest, uploads an Actions
+artifact, and publishes the files as the latest GitHub Release.
 
 ## Development prerequisites
 
@@ -168,8 +186,8 @@ Exit the serial monitor with `Ctrl+]`. Replace `/dev/ttyUSB0` if the adapter use
 another device such as `/dev/ttyUSB1` or `/dev/ttyACM0`.
 
 Confirm the detected flash size in `menuconfig`. The supplied partition table
-uses a single 1 MiB application partition and fits common 2 MiB and 4 MiB
-ESP8266 modules. Do not flash only the application at an assumed offset on the
+uses two 896 KiB OTA application slots and requires at least 2 MiB of flash.
+Do not flash only the application at an assumed offset on the
 first installation; use `idf.py flash` so the matching bootloader, partition
 table, PHY data, and application are written to their correct offsets.
 
@@ -201,8 +219,8 @@ The firmware has been successfully compiled with ESP8266 RTOS SDK
 ## Recovery and deployment safety
 
 - To erase only the door configuration, boot normally and then hold GPIO 0 low
-  continuously for ten seconds. Releasing it early cancels the operation. The
-  board restarts in setup mode with a newly generated SSID/password pair.
+  continuously for five seconds. Releasing it early cancels the operation. The
+  board restarts with a newly generated open setup SSID.
 - Verify relay polarity with the lock disconnected. The code assumes an
   active-high relay on GPIO 12, preloads the inactive level before enabling the
   output, and initializes it before NVS or networking.
@@ -210,12 +228,11 @@ The firmware has been successfully compiled with ESP8266 RTOS SDK
   the ESP8266 is resetting or before firmware configures GPIO 12. Firmware
   cannot control the pin during the ROM bootloader interval, so this resistor is
   required for a hardware guarantee that the relay never powers during reboot.
-- The local configuration site uses HTTP, not HTTPS, and has no login. It exists
-  only on the setup AP during first initialization or after factory reset; it is
-  not reachable on the home LAN after provisioning.
+- The local panel uses HTTP, not HTTPS. It remains reachable on the home LAN;
+  configure its optional password if the LAN is not fully trusted.
 - The setup AP is enabled only during initial provisioning and after a factory
-  reset. Its eight-character hexadecimal password is the same suffix shown in
-  its SSID.
+  reset. It is open, so complete setup promptly and do not expose setup mode in
+  an untrusted area.
 - Use a unique, device-scoped server token and enforce authorization and rate
   limiting on the WebSocket server as well as on the device.
 - NVS stores Wi-Fi and server credentials in recoverable form unless flash/NVS

@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "door_config.h"
 #include "door_control.h"
+#include "door_ota.h"
 #include "door_wifi.h"
 #include "esp_log.h"
 #include "esp_transport.h"
@@ -19,7 +20,6 @@
 #include "http_parser.h"
 #include "lwip/apps/sntp.h"
 
-#define FIRMWARE_VERSION "3.0.0-esp8266"
 #define WS_MESSAGE_MAX 1024
 #define WS_CONNECT_TIMEOUT_MS 10000
 #define WS_IO_TIMEOUT_MS 3000
@@ -111,6 +111,9 @@ static void handle_text(char *text)
     else if (!strcmp(command->valuestring, "open-door")) {
         esp_err_t err = door_control_open();
         send_response(err == ESP_OK, err == ESP_OK ? "Door opened successfully." : "Door relay is already active.");
+    } else if (!strcmp(command->valuestring, "update-firmware")) {
+        esp_err_t err = door_ota_update_latest();
+        send_response(err == ESP_OK, err == ESP_OK ? "Signed firmware update started." : "A firmware operation is already active.");
     } else send_response(false, "Unknown command.");
     cJSON_Delete(root);
 }
@@ -169,7 +172,7 @@ static void socket_session(const door_config_t *config)
     s_socket = esp_transport_ws_init(parent);
     if (!s_socket) { esp_transport_list_destroy(transports); return; }
     esp_transport_ws_set_path(s_socket, url.path);
-    esp_transport_ws_set_user_agent(s_socket, "smart-door-opener/3.0.0-esp8266");
+    esp_transport_ws_set_user_agent(s_socket, "smart-door-opener/" FIRMWARE_VERSION);
     char *headers = NULL;
     if (config->authorization_token[0]) {
         size_t length = strlen(config->authorization_token) + 32;
