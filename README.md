@@ -88,18 +88,21 @@ required by your server.
 ## TLS certificate
 
 [`main/certs/server_root_ca.pem`](main/certs/server_root_ca.pem) contains
-ISRG Root X1, USERTrust ECC, and the Let's Encrypt YR1 intermediate CA.
+only directly trusted intermediate CAs:
+Let's Encrypt YR1 (door endpoint and release assets), plus Sectigo Public
+Server Authentication CA DV E36 (GitHub). E36 was verified against Sectigo
+Root E46; rotate it before **2036-03-21**, or if GitHub changes issuer.
 YR1 is a direct trust anchor for `door.alitayyeb.ir`: the legacy ESP8266 TLS
 verifier rejects its longer chain through Root YR to ISRG Root X1. YR1 was
 verified against ISRG Root X1 before embedding; rotate it before its expiry
-on **2028-09-02**, or if the endpoint changes issuer. Keep the other roots for
-OTA HTTPS endpoints. Certificate hostname, signature, and validity checks
-remain enabled. For another issuer, add its verified CA and rebuild. Do not
+on **2028-09-02**, or if the endpoint changes issuer. Certificate hostname,
+signature, and validity checks remain enabled. For another issuer, add its verified CA and rebuild. Do not
 switch to `ws://` or disable validation to work around TLS failures.
 
-TLS uses SDK dynamic buffers (4 KB initially) and frees handshake certificate
-data to leave room for RSA operations on the ESP8266. These settings are in
-`sdkconfig.defaults`; existing builds must also apply them to `sdkconfig`
+TLS uses SDK dynamic buffers (16 KB receive limit, 1 KB transmit limit) and
+frees handshake certificate data to leave room for RSA operations on the
+ESP8266. The receive limit supports full-size TLS records from GitHub.
+These settings are in `sdkconfig.defaults`; existing builds must also apply them to `sdkconfig`
 through `idf.py menuconfig` or regenerate `sdkconfig`.
 
 The ESP8266 starts synchronization through `pool.ntp.org`. If NTP is blocked,

@@ -58,17 +58,40 @@ const char *door_ota_state_name(door_ota_state_t state)
     return state <= DOOR_OTA_ERROR ? names[state] : "error";
 }
 
+/* Streaming HTTP calls do not follow redirects automatically in SDK v3.4. */
+static int open_download(esp_http_client_handle_t client)
+{
+    for (int redirects = 0; redirects <= 5; ++redirects) {
+        if (esp_http_client_open(client, 0) != ESP_OK) return -1;
+        int length = esp_http_client_fetch_headers(client);
+        if (length < 0) return -1;
+        int status = esp_http_client_get_status_code(client);
+        if (status == 200) return length;
+        if (redirects == 5 || (status != 301 && status != 302 && status != 303 &&
+                              status != 307 && status != 308)) {
+            ESP_LOGW("door_ota", "Download rejected HTTP status %d", status);
+            return -1;
+        }
+        /* SDK SSL close returns -1 even after successful cleanup. */
+        (void)esp_http_client_close(client);
+        if (esp_http_client_set_redirection(client) != ESP_OK ||
+            esp_http_client_get_transport_type(client) != HTTP_TRANSPORT_OVER_SSL) return -1;
+    }
+    return -1;
+}
+
 static int download(const char *url, uint8_t *buffer, size_t capacity)
 {
     esp_http_client_config_t config = { .url = url, .cert_pem = (const char *)server_root_ca_start,
-                                        .timeout_ms = 15000, .buffer_size = 1024 };
+                                        .timeout_ms = 15000, .buffer_size = 2048, .buffer_size_tx = 2048 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client || esp_http_client_open(client, 0) != ESP_OK) {
-        if (client) esp_http_client_cleanup(client);
+    if (!client) return -1;
+    int length = open_download(client);
+    if (length < 0) {
+        esp_http_client_cleanup(client);
         return -1;
     }
-    int length = esp_http_client_fetch_headers(client);
-    if (esp_http_client_get_status_code(client) != 200 || length < 0 || (size_t)length >= capacity) {
+    if ((size_t)length >= capacity) {
         esp_http_client_close(client); esp_http_client_cleanup(client); return -1;
     }
     int total = 0;
@@ -183,15 +206,15 @@ static void update_task(void *unused)
         return;
     }
     esp_http_client_config_t config = { .url = s_firmware_url, .cert_pem = (const char *)server_root_ca_start,
-                                        .timeout_ms = 15000, .buffer_size = 2048 };
+                                        .timeout_ms = 15000, .buffer_size = 2048, .buffer_size_tx = 2048 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
     esp_ota_handle_t handle = 0;
     bool begun = false;
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha); mbedtls_sha256_starts_ret(&sha, 0);
-    if (!client || !partition || esp_http_client_open(client, 0) != ESP_OK) goto failed;
-    int length = esp_http_client_fetch_headers(client);
+    if (!client || !partition) goto failed;
+    int length = open_download(client);
     if (esp_http_client_get_status_code(client) != 200 || length <= 0 || (size_t)length > partition->size ||
         esp_ota_begin(partition, length, &handle) != ESP_OK) goto failed;
     begun = true;
