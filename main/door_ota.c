@@ -9,6 +9,7 @@
 #include "door_time.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_image_format.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -197,6 +198,21 @@ esp_err_t door_ota_check(void)
     return ESP_OK;
 }
 
+/* ESP8266 cache selects a 1 MiB window; it cannot relocate within that window. */
+static bool image_mapping_valid(const esp_partition_t *partition)
+{
+    esp_image_metadata_t image;
+    const esp_partition_pos_t position = { .offset = partition->address, .size = partition->size };
+    if (esp_image_load(ESP_IMAGE_VERIFY, &position, &image) != ESP_OK) return false;
+    /* First flash segment fixes the link origin; later SDK segments have padding. */
+    uint32_t address = image.segments[0].load_addr;
+    if (address != 0x40200000 + (image.segment_data[0] & 0xfffff)) {
+        ESP_LOGE("door_ota", "Image cache mapping incompatible with slot at 0x%x", partition->address);
+        return false;
+    }
+    return true;
+}
+
 static void update_task(void *unused)
 {
     (void)unused;
@@ -212,29 +228,37 @@ static void update_task(void *unused)
     esp_ota_handle_t handle = 0;
     bool begun = false;
     mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha); mbedtls_sha256_starts_ret(&sha, 0);
-    if (!client || !partition) goto failed;
+    mbedtls_sha256_init(&sha);
+    if (mbedtls_sha256_starts_ret(&sha, 0) != 0) goto failed;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!client || !partition || !running || partition->address == running->address) goto failed;
     int length = open_download(client);
     if (esp_http_client_get_status_code(client) != 200 || length <= 0 || (size_t)length > partition->size ||
         esp_ota_begin(partition, length, &handle) != ESP_OK) goto failed;
     begun = true;
     uint8_t buffer[2048]; int total = 0;
     while (total < length) {
-        int count = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
-        if (count <= 0 || esp_ota_write(handle, buffer, count) != ESP_OK) goto failed;
-        mbedtls_sha256_update_ret(&sha, buffer, count); total += count;
+        int remaining = length - total;
+        int count = esp_http_client_read(client, (char *)buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer));
+        if (count <= 0 || count > remaining || esp_ota_write(handle, buffer, count) != ESP_OK) goto failed;
+        if (mbedtls_sha256_update_ret(&sha, buffer, count) != 0) goto failed;
+        total += count;
         set_status(DOOR_OTA_DOWNLOADING, (unsigned)((uint64_t)total * 100 / length), "Downloading signed firmware...");
     }
     set_status(DOOR_OTA_VERIFYING, 100, "Verifying firmware signature and image...");
-    uint8_t actual[32]; mbedtls_sha256_finish_ret(&sha, actual);
-    if (memcmp(actual, s_expected_sha256, sizeof(actual)) || esp_ota_end(handle) != ESP_OK) { begun = false; goto failed; }
+    uint8_t actual[32];
+    if (total != length || mbedtls_sha256_finish_ret(&sha, actual) != 0 ||
+        memcmp(actual, s_expected_sha256, sizeof(actual))) goto failed;
+    esp_err_t end_result = esp_ota_end(handle);
     begun = false;
+    if (end_result != ESP_OK || !image_mapping_valid(partition)) goto failed;
     if (esp_ota_set_boot_partition(partition) != ESP_OK) goto failed;
     esp_http_client_close(client); esp_http_client_cleanup(client); mbedtls_sha256_free(&sha);
     set_status(DOOR_OTA_READY, 100, "Verified. Restarting into the new firmware...");
     vTaskDelay(pdMS_TO_TICKS(1500)); esp_restart();
 failed:
-    if (begun) esp_ota_end(handle);
+    /* SDK v3.4 has no esp_ota_abort; end frees the handle without selecting it. */
+    if (begun) (void)esp_ota_end(handle);
     if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
     mbedtls_sha256_free(&sha);
     door_socket_resume_after_ota();

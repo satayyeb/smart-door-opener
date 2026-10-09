@@ -141,11 +141,11 @@ static esp_err_t root_get(httpd_req_t *request)
         "<p class=hint><small>When set, sign in as <b>admin</b>. Without a password, anyone on the LAN can change settings.</small></p></section>"
         "<section class=card><h2>Firmware update</h2><p>Installed: <b>" FIRMWARE_VERSION "</b></p><button id=check type=button>Check for firmware updates</button> "
         "<button id=install class=secondary type=button disabled>Install signed update</button><p id=otaMessage class=hint>Ready.</p><div class=bar><i id=progress></i></div></section>"
-        "<p><small>Station: %s · Firmware " FIRMWARE_VERSION "</small></p></main><script>"
+        "<p><small>Station: %s | Firmware " FIRMWARE_VERSION " | Designed by Sayyed Ali Tayyeb</small></p></main><script>"
         "const check=document.getElementById('check'),install=document.getElementById('install'),msg=document.getElementById('otaMessage'),bar=document.getElementById('progress');"
-        "async function post(p){check.disabled=true;install.disabled=true;try{await fetch(p,{method:'POST'});}catch(e){msg.textContent='Request failed: '+e}poll()}"
-        "async function poll(){try{let s=await(await fetch('/api/ota/status',{cache:'no-store'})).json();msg.textContent=s.message+(s.available_version?' Version '+s.available_version+'.':'');bar.style.width=s.progress+'%%';"
-        "check.disabled=['checking','downloading','verifying'].includes(s.state);install.disabled=s.state!=='available';if(['checking','downloading','verifying','ready'].includes(s.state))setTimeout(poll,700);}catch(e){msg.textContent='Status failed: '+e}}"
+        "async function post(p){check.disabled=true;install.disabled=true;try{let r=await fetch(p,{method:'POST'});if(!r.ok)throw Error('HTTP '+r.status);}catch(e){msg.textContent='Request failed: '+e}poll()}"
+        "async function poll(){try{let r=await fetch('/api/ota/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);let text=await r.text();if(!text)throw Error('Empty status response');let s=JSON.parse(text);msg.textContent=s.message+(s.available_version?' Version '+s.available_version+'.':'');bar.style.width=s.progress+'%%';"
+        "check.disabled=['checking','downloading','verifying'].includes(s.state);install.disabled=s.state!=='available';if(['checking','downloading','verifying','ready'].includes(s.state))setTimeout(poll,700);}catch(e){msg.textContent='Controller unavailable; retrying. '+e.message;setTimeout(poll,2000)}}"
         "check.onclick=()=>post('/api/ota/check');install.onclick=()=>{if(confirm('Install the verified update and restart the controller?'))post('/api/ota/start')};poll();</script></body></html>";
     const char *mode = door_config_is_provisioned() ? "Setup access point is off; this panel is available on the LAN." : "Initial setup access point is open and will turn off after saving.";
     size_t size = strlen(format) + strlen(STYLE) + strlen(mode) + strlen(wifi_fields) + strlen(uri) + 128;

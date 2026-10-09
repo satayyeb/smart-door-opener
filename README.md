@@ -232,6 +232,45 @@ The firmware has been successfully compiled with ESP8266 RTOS SDK
 `release/v3.4`, Xtensa GCC 8.4.0, Python 3.14.4 in the SDK environment, and CMake
 4.2.3.
 
+## OTA layout migration and recovery
+
+The ESP8266 maps flash in 1 MiB windows. Both slots must have the same offset
+within their window for one linked binary: `ota_0` at `0x20000`, `ota_1` at
+`0x120000`, each `0xe0000` bytes. The former `ota_1` at `0x100000` passed SDK
+image checks but booted with the wrong cache mapping and watchdog-reset before
+`app_main`. An application-only OTA cannot update the partition table.
+
+For a board stuck after that update, disconnect the lock and use USB serial:
+
+```sh
+esp-lagecy
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
+
+This writes the corrected partition table, resets OTA selection to `ota_0`,
+and flashes the application. It preserves NVS Wi-Fi and panel settings;
+do not use `erase_flash`. If needed, hold GPIO 0 low during reset to enter ROM
+serial download mode, then release it before normal boot.
+
+Failed/truncated downloads or bad hashes never select the downloaded slot.
+The firmware also rejects incompatible image link origins before selecting a
+slot. SDK v3.4 has no automatic rollback for a checksum-valid application that
+crashes before startup; that requires a separate bootloader change and serial
+installation. Do not treat image validation as a successful device boot.
+
+Run host checks after building:
+
+```sh
+python3 tests/check_ota_redirects.py
+python3 tests/check_ota_safety.py
+```
+
+Device acceptance checks: interrupt download around 70%, confirm the original
+firmware still runs after reset, then complete updates in both directions and
+confirm the boot offsets alternate between `0x20000` and `0x120000`. Keep the
+lock disconnected throughout these checks.
+
 ## Recovery and deployment safety
 
 - To erase only the door configuration, boot normally and then hold GPIO 0 low

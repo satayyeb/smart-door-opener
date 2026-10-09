@@ -36,6 +36,8 @@ jobs:
         run: |
           source "$RUNNER_TEMP/ESP8266_RTOS_SDK/export.sh"
           idf.py -D PROJECT_VER="$VERSION" build
+          python tests/check_ota_redirects.py
+          python tests/check_ota_safety.py
           cp build/smart-door-opener.bin smart-door-opener.bin
 
       - name: Create and sign manifest
