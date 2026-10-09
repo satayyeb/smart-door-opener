@@ -135,7 +135,7 @@ static esp_err_t root_get(httpd_req_t *request)
         "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><title>Smart Door</title>%s</head><body><main>"
         "<section class=hero><h1>Smart Door</h1><p>LAN configuration and signed firmware updates.</p></section><section class=card><p class=ok>%s</p>"
         "<form method=post action=/api/config>%s<label>WebSocket endpoint</label><input name=websocket_uri maxlength=255 required value='%s'>"
-        "<label>Authorization header value</label><input type=password name=authorization_token maxlength=191 placeholder='Leave blank to keep current token'>"
+        "<label>Device token or full Authorization header value</label><input type=password name=authorization_token maxlength=191 placeholder='Leave blank to keep current token'>"
         "<h3>Panel access</h3><label>New optional panel password</label><input type=password name=panel_password minlength=8 placeholder='Leave blank to keep current setting'>"
         "<label><input style='width:auto' type=checkbox name=remove_panel_password value=1> Remove panel password</label><button>Save and reboot</button></form>"
         "<p class=hint><small>When set, sign in as <b>admin</b>. Without a password, anyone on the LAN can change settings.</small></p></section>"

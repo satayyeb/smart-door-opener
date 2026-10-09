@@ -166,7 +166,8 @@ static void socket_session(const door_config_t *config)
         size_t length = strlen(config->authorization_token) + 32;
         headers = malloc(length);
         if (headers) {
-            snprintf(headers, length, "Authorization: %s\r\n", config->authorization_token);
+            snprintf(headers, length, "Authorization: %s%s\r\n",
+                     strchr(config->authorization_token, ' ') ? "" : "Bearer ", config->authorization_token);
             esp_transport_ws_set_headers(s_socket, headers);
             free(headers);
         }

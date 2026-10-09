@@ -78,24 +78,32 @@ oversized frames cannot actuate the relay.
 When an authorization value is configured, the WebSocket upgrade contains:
 
 ```http
-Authorization: <configured value>
+Authorization: Bearer <device token>
 ```
 
-Enter the complete value expected by the server, such as `Bearer TOKEN`, if the
-server uses a scheme.
+Bare device tokens automatically receive the `Bearer ` prefix. You can also
+enter a complete header value, such as `Bearer TOKEN` or another scheme
+required by your server.
 
 ## TLS certificate
 
-[`main/certs/server_root_ca.pem`](main/certs/server_root_ca.pem) contains ISRG
-Root X1 and a directly trusted Let's Encrypt YR1 intermediate. YR1 is required
-because the legacy SDK cannot reliably build the server's newer
-YR1 → Root YR → ISRG Root X1 chain. Rotate this compatibility certificate
-before it expires on **2028-09-02**. Certificate hostname, signature, and
-validity checks remain enabled. Do not work around TLS failures by switching to
-`ws://` or disabling validation on an Internet connection.
+[`main/certs/server_root_ca.pem`](main/certs/server_root_ca.pem) contains
+ISRG Root X1, USERTrust ECC, and the Let's Encrypt YR1 intermediate CA.
+YR1 is a direct trust anchor for `door.alitayyeb.ir`: the legacy ESP8266 TLS
+verifier rejects its longer chain through Root YR to ISRG Root X1. YR1 was
+verified against ISRG Root X1 before embedding; rotate it before its expiry
+on **2028-09-02**, or if the endpoint changes issuer. Keep the other roots for
+OTA HTTPS endpoints. Certificate hostname, signature, and validity checks
+remain enabled. For another issuer, add its verified CA and rebuild. Do not
+switch to `ws://` or disable validation to work around TLS failures.
+
+TLS uses SDK dynamic buffers (4 KB initially) and frees handshake certificate
+data to leave room for RSA operations on the ESP8266. These settings are in
+`sdkconfig.defaults`; existing builds must also apply them to `sdkconfig`
+through `idf.py menuconfig` or regenerate `sdkconfig`.
 
 The ESP8266 starts synchronization through `pool.ntp.org`. If NTP is blocked,
-it uses the firmware build time as a safe initial lower bound for TLS while
+it uses firmware build time as an initial lower bound for TLS while
 continuing to synchronize in the background.
 
 ## Signed firmware updates
