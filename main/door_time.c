@@ -52,6 +52,6 @@ bool door_time_ready(void)
     if (compiled <= 1704067200) return false;
     struct timeval value = { .tv_sec = compiled, .tv_usec = 0 };
     if (settimeofday(&value, NULL) != 0) return false;
-    ESP_LOGW(TAG, "SNTP unavailable; seeded clock from firmware build time until synchronization succeeds");
+    ESP_LOGW(TAG, "Time not synchronized yet; using firmware compile time while SNTP runs in background");
     return true;
 }

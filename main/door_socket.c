@@ -23,7 +23,7 @@
 #define WS_MESSAGE_MAX 1024
 #define WS_CONNECT_TIMEOUT_MS 10000
 #define WS_IO_TIMEOUT_MS 3000
-#define WS_RECONNECT_MS 5000
+#define WS_RECONNECT_MS 10000
 #define WS_TASK_STACK_SIZE 8192
 
 static const char *TAG = "door_socket";
