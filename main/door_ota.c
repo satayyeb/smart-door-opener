@@ -26,6 +26,7 @@
 #define OTA_TASK_STACK_SIZE 8192
 
 static SemaphoreHandle_t s_lock;
+static bool s_remote_update_pending;
 static door_ota_status_t s_status = { .state = DOOR_OTA_IDLE, .current_version = FIRMWARE_VERSION };
 static char s_firmware_url[512];
 static uint8_t s_expected_sha256[32];
@@ -84,7 +85,7 @@ static int open_download(esp_http_client_handle_t client)
 static int download(const char *url, uint8_t *buffer, size_t capacity)
 {
     esp_http_client_config_t config = { .url = url, .cert_pem = (const char *)server_root_ca_start,
-                                        .timeout_ms = 15000, .buffer_size = 2048, .buffer_size_tx = 2048 };
+                                        .timeout_ms = 15000, .buffer_size = 512, .buffer_size_tx = 2048 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return -1;
     int length = open_download(client);
@@ -213,16 +214,14 @@ static bool image_mapping_valid(const esp_partition_t *partition)
     return true;
 }
 
-static void update_task(void *unused)
+static void update_now(void)
 {
-    (void)unused;
     if (door_socket_pause_for_ota() != ESP_OK) {
         set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection for a safe update.");
-        vTaskDelete(NULL);
         return;
     }
     esp_http_client_config_t config = { .url = s_firmware_url, .cert_pem = (const char *)server_root_ca_start,
-                                        .timeout_ms = 15000, .buffer_size = 2048, .buffer_size_tx = 2048 };
+                                        .timeout_ms = 15000, .buffer_size = 512, .buffer_size_tx = 2048 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
     esp_ota_handle_t handle = 0;
@@ -263,6 +262,12 @@ failed:
     mbedtls_sha256_free(&sha);
     door_socket_resume_after_ota();
     set_status(DOOR_OTA_ERROR, 0, "Firmware download or verification failed; the current image remains active.");
+}
+
+static void update_task(void *unused)
+{
+    (void)unused;
+    update_now();
     vTaskDelete(NULL);
 }
 
@@ -279,16 +284,16 @@ esp_err_t door_ota_start(void)
     return ESP_OK;
 }
 
-static void remote_update_task(void *unused)
+void door_ota_run_pending_remote_update(void)
 {
-    (void)unused;
+    if (!s_remote_update_pending) return;
+    s_remote_update_pending = false;
     esp_err_t err = door_socket_pause_for_ota();
     if (err == ESP_OK) err = check_now();
-    if (err == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_task(NULL);
+    if (err == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_now();
     door_socket_resume_after_ota();
     if (err != ESP_OK && s_status.state != DOOR_OTA_UP_TO_DATE)
         set_status(DOOR_OTA_ERROR, 0, "Remote update check or verification failed.");
-    vTaskDelete(NULL);
 }
 
 esp_err_t door_ota_update_latest(void)
@@ -297,8 +302,7 @@ esp_err_t door_ota_update_latest(void)
     if (status.state == DOOR_OTA_CHECKING || status.state == DOOR_OTA_DOWNLOADING || status.state == DOOR_OTA_VERIFYING) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_CHECKING, 0, "Backend requested a signed firmware update.");
     door_socket_request_ota_pause();
-    if (xTaskCreate(remote_update_task, "ota_remote", OTA_TASK_STACK_SIZE, NULL, 4, NULL) != pdPASS) {
-        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
-    }
+    /* Reuse the WebSocket task only after it releases its TLS connection. */
+    s_remote_update_pending = true;
     return ESP_OK;
 }

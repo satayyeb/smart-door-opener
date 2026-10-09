@@ -209,6 +209,7 @@ static void websocket_task(void *unused)
             door_config_get(&config);
             socket_session(&config);
         }
+        door_ota_run_pending_remote_update();
         vTaskDelay(pdMS_TO_TICKS(WS_RECONNECT_MS));
     }
 }

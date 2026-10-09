@@ -30,5 +30,7 @@ typedef struct {
 esp_err_t door_ota_check(void);
 esp_err_t door_ota_start(void);
 esp_err_t door_ota_update_latest(void);
+/* WebSocket task only, after transport cleanup and command acknowledgement. */
+void door_ota_run_pending_remote_update(void);
 void door_ota_get_status(door_ota_status_t *status);
 const char *door_ota_state_name(door_ota_state_t state);
