@@ -6,6 +6,8 @@
 #include <string.h>
 #include "door_config.h"
 #include "door_ota.h"
+#include "door_rfid.h"
+#include "cJSON.h"
 #include "door_wifi.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -15,6 +17,7 @@
 #include "mbedtls/base64.h"
 
 static const char *TAG = "door_web";
+static char s_csrf[33];
 
 static const char STYLE[] =
 "<style>:root{color-scheme:light}*{box-sizing:border-box}body{font:16px system-ui,-apple-system,sans-serif;background:#f4f7fb;color:#172033;margin:0}"
@@ -53,6 +56,35 @@ denied:
     return false;
 }
 
+static bool csrf_authorized(httpd_req_t *request)
+{
+    char token[sizeof(s_csrf)];
+    return httpd_req_get_hdr_value_len(request, "X-Door-CSRF") == sizeof(s_csrf) - 1 &&
+           httpd_req_get_hdr_value_str(request, "X-Door-CSRF", token, sizeof(token)) == ESP_OK &&
+           !strcmp(token, s_csrf);
+}
+
+static bool rfid_authorized(httpd_req_t *request, bool mutation)
+{
+    if (!door_config_is_provisioned() || !door_config_panel_password_set()) {
+        send_error(request, "403 Forbidden", "Provision device and set panel password before managing cards");
+        return false;
+    }
+    if (!authorized(request)) return false;
+    if (mutation && !csrf_authorized(request)) {
+        send_error(request, "403 Forbidden", "Invalid request token; reload panel");
+        return false;
+    }
+    return true;
+}
+
+static const char RFID_PANEL[] =
+"<section class=card><h2>RFID cards</h2><p>Classic 1K cards can be cloned despite custom keys. Use dedicated cards: enrollment overwrites sector 7 block 28 and trailer 31.</p>"
+"<p>Set panel password before managing cards. Card scans require no PIN or phone.</p>"
+"<label for=cardName>Card name</label><input id=cardName maxlength=48 placeholder=\"Ali's card\">"
+"<button id=enrollCard type=button>Enroll next card</button> <button id=cancelCard type=button class=secondary>Cancel enrollment</button>"
+"<p id=rfidMessage role=status>Loading reader status...</p><ul id=cardList></ul></section>";
+
 static void html_escape(const char *input, char *output, size_t size)
 {
     while (*input && size > 1) {
@@ -76,7 +108,7 @@ static void url_decode(char *value)
     char *read = value, *write = value;
     while (*read) {
         if (*read == '+') { *write++ = ' '; ++read; }
-        else if (*read == '%' && hex_value(read[1]) >= 0 && hex_value(read[2]) >= 0) { *write++ = hex_value(read[1]) * 16 + hex_value(read[2]); read += 3; }
+        else if (*read == '%' && read[1] && read[2] && hex_value(read[1]) >= 0 && hex_value(read[2]) >= 0) { *write++ = hex_value(read[1]) * 16 + hex_value(read[2]); read += 3; }
         else *write++ = *read++;
     }
     *write = 0;
@@ -85,7 +117,7 @@ static void url_decode(char *value)
 typedef struct {
     char *ssid[DOOR_WIFI_NETWORKS_MAX]; char *wifi_password[DOOR_WIFI_NETWORKS_MAX];
     char *clear_wifi_password[DOOR_WIFI_NETWORKS_MAX];
-    char *websocket_uri; char *authorization_token; char *panel_password; char *remove_panel_password;
+    char *websocket_uri; char *authorization_token; char *panel_password; char *remove_panel_password; char *csrf;
 } form_fields_t;
 
 static form_fields_t parse_form(char *body)
@@ -101,7 +133,8 @@ static form_fields_t parse_form(char *body)
                 snprintf(key, sizeof(key), "wifi_password%d", i); if (!strcmp(part, key)) fields.wifi_password[i] = equals;
                 snprintf(key, sizeof(key), "clear_wifi_password%d", i); if (!strcmp(part, key)) fields.clear_wifi_password[i] = equals;
             }
-            if (!strcmp(part, "websocket_uri")) fields.websocket_uri = equals;
+            if (!strcmp(part, "csrf")) fields.csrf = equals;
+            else if (!strcmp(part, "websocket_uri")) fields.websocket_uri = equals;
             else if (!strcmp(part, "authorization_token")) fields.authorization_token = equals;
             else if (!strcmp(part, "panel_password")) fields.panel_password = equals;
             else if (!strcmp(part, "remove_panel_password")) fields.remove_panel_password = equals;
@@ -134,23 +167,29 @@ static esp_err_t root_get(httpd_req_t *request)
     const char *format =
         "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><title>Smart Door</title>%s</head><body><main>"
         "<section class=hero><h1>Smart Door</h1><p>LAN configuration and signed firmware updates.</p></section><section class=card><p class=ok>%s</p>"
-        "<form method=post action=/api/config>%s<label>WebSocket endpoint</label><input name=websocket_uri maxlength=255 required value='%s'>"
+        "<form method=post action=/api/config><input type=hidden name=csrf value='%s'>%s<label>WebSocket endpoint</label><input name=websocket_uri maxlength=255 required value='%s'>"
         "<label>Device token or full Authorization header value</label><input type=password name=authorization_token maxlength=191 placeholder='Leave blank to keep current token'>"
         "<h3>Panel access</h3><label>New optional panel password</label><input type=password name=panel_password minlength=8 placeholder='Leave blank to keep current setting'>"
         "<label><input style='width:auto' type=checkbox name=remove_panel_password value=1> Remove panel password</label><button>Save and reboot</button></form>"
         "<p class=hint><small>When set, sign in as <b>admin</b>. Without a password, anyone on the LAN can change settings.</small></p></section>"
         "<section class=card><h2>Firmware update</h2><p>Installed: <b>" FIRMWARE_VERSION "</b></p><button id=check type=button>Check for firmware updates</button> "
         "<button id=install class=secondary type=button disabled>Install signed update</button><p id=otaMessage class=hint>Ready.</p><div class=bar><i id=progress></i></div></section>"
-        "<p><small>Station: %s | Firmware " FIRMWARE_VERSION " | Designed by Sayyed Ali Tayyeb</small></p></main><script>"
-        "const check=document.getElementById('check'),install=document.getElementById('install'),msg=document.getElementById('otaMessage'),bar=document.getElementById('progress');"
-        "async function post(p){check.disabled=true;install.disabled=true;try{let r=await fetch(p,{method:'POST'});if(!r.ok)throw Error('HTTP '+r.status);}catch(e){msg.textContent='Request failed: '+e}poll()}"
+        "%s<p><small>Station: %s | Firmware " FIRMWARE_VERSION " | Designed by Sayyed Ali Tayyeb</small></p></main><script>"
+        "const csrf='%s';const check=document.getElementById('check'),install=document.getElementById('install'),msg=document.getElementById('otaMessage'),bar=document.getElementById('progress');"
+        "async function post(p){check.disabled=true;install.disabled=true;try{let r=await fetch(p,{method:'POST',headers:{'X-Door-CSRF':csrf}});if(!r.ok)throw Error('HTTP '+r.status);}catch(e){msg.textContent='Request failed: '+e}poll()}"
         "async function poll(){try{let r=await fetch('/api/ota/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);let text=await r.text();if(!text)throw Error('Empty status response');let s=JSON.parse(text);msg.textContent=s.message+(s.available_version?' Version '+s.available_version+'.':'');bar.style.width=s.progress+'%%';"
         "check.disabled=['checking','downloading','verifying'].includes(s.state);install.disabled=s.state!=='available';if(['checking','downloading','verifying','ready'].includes(s.state))setTimeout(poll,700);}catch(e){msg.textContent='Controller unavailable; retrying. '+e.message;setTimeout(poll,2000)}}"
-        "check.onclick=()=>post('/api/ota/check');install.onclick=()=>{if(confirm('Install the verified update and restart the controller?'))post('/api/ota/start')};poll();</script></body></html>";
+        "check.onclick=()=>post('/api/ota/check');install.onclick=()=>{if(confirm('Install the verified update and restart the controller?'))post('/api/ota/start')};poll();"
+        "const cardMsg=document.getElementById('rfidMessage'),cardList=document.getElementById('cardList'),enroll=document.getElementById('enrollCard'),cancel=document.getElementById('cancelCard');"
+        "async function cardPost(path,data={}){try{let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Door-CSRF':csrf},body:JSON.stringify(data)});if(!r.ok)throw Error(await r.text());await cardsPoll(false)}catch(e){cardMsg.textContent=e.message}}"
+        "async function cardsPoll(repeat=true){try{let r=await fetch('/api/rfid/status',{cache:'no-store'});if(!r.ok)throw Error(await r.text());let s=await r.json();cardMsg.textContent=s.message;enroll.disabled=!s.ready||s.enrolling;cancel.disabled=!s.enrolling;cardList.replaceChildren();"
+        "for(let c of s.cards){let li=document.createElement('li'),b=document.createElement('button');li.append(document.createTextNode(c.name+(c.pending?' (pending; no access)':'')+' '));b.type='button';b.className='secondary';b.textContent='Delete';b.onclick=()=>{if(confirm('Revoke access for '+c.name+'?'))cardPost('/api/rfid/delete',{id:c.id})};li.append(b);cardList.append(li)}}"
+        "catch(e){cardMsg.textContent=e.message;enroll.disabled=true;cancel.disabled=true}if(repeat)setTimeout(cardsPoll,1500)}"
+        "enroll.onclick=()=>{let name=document.getElementById('cardName').value.trim();if(!name){cardMsg.textContent='Enter card name';return}if(confirm('Overwrite sector 7 on next card? Use a dedicated card.'))cardPost('/api/rfid/enroll',{name})};cancel.onclick=()=>cardPost('/api/rfid/cancel');cardsPoll();</script></body></html>";
     const char *mode = door_config_is_provisioned() ? "Setup access point is off; this panel is available on the LAN." : "Initial setup access point is open and will turn off after saving.";
-    size_t size = strlen(format) + strlen(STYLE) + strlen(mode) + strlen(wifi_fields) + strlen(uri) + 128;
+    size_t size = strlen(format) + strlen(STYLE) + strlen(mode) + strlen(wifi_fields) + strlen(uri) + strlen(RFID_PANEL) + sizeof(s_csrf) * 2 + 128;
     char *html = malloc(size); if (!html) { free(wifi_fields); return send_error(request, "500 Internal Server Error", "Out of memory"); }
-    snprintf(html, size, format, STYLE, mode, wifi_fields, uri, door_wifi_station_connected() ? "connected" : "not connected");
+    snprintf(html, size, format, STYLE, mode, s_csrf, wifi_fields, uri, RFID_PANEL, door_wifi_station_connected() ? "connected" : "not connected", s_csrf);
     httpd_resp_set_type(request, "text/html"); httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_send(request, html, -1); free(html); free(wifi_fields); return err;
 }
@@ -159,7 +198,9 @@ static esp_err_t config_post(httpd_req_t *request)
 {
     if (!authorized(request)) return ESP_OK;
     char *body = receive_form(request); if (!body) return send_error(request, "400 Bad Request", "Invalid form");
-    form_fields_t fields = parse_form(body); door_config_t old; door_config_get(&old);
+    form_fields_t fields = parse_form(body);
+    if (!fields.csrf || strcmp(fields.csrf, s_csrf)) { free(body); return send_error(request, "403 Forbidden", "Invalid request token; reload panel"); }
+    door_config_t old; door_config_get(&old);
     char ssids[DOOR_WIFI_NETWORKS_MAX][DOOR_SSID_MAX + 1] = {0}, passwords[DOOR_WIFI_NETWORKS_MAX][DOOR_WIFI_PASSWORD_MAX + 1] = {0};
     for (int i = 0; i < DOOR_WIFI_NETWORKS_MAX; ++i) {
         if (fields.ssid[i]) strlcpy(ssids[i], fields.ssid[i], sizeof(ssids[i]));
@@ -187,8 +228,84 @@ static esp_err_t ota_status_get(httpd_req_t *request)
     httpd_resp_set_type(request, "application/json"); httpd_resp_set_hdr(request, "Cache-Control", "no-store"); return httpd_resp_send(request, json, -1);
 }
 
-static esp_err_t ota_check_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; return door_ota_check() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "OTA is busy"); }
-static esp_err_t ota_start_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; return door_ota_start() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "No verified update is ready"); }
+static esp_err_t ota_check_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; if (!csrf_authorized(request)) return send_error(request, "403 Forbidden", "Invalid request token"); return door_ota_check() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "OTA is busy"); }
+static esp_err_t ota_start_post(httpd_req_t *request) { if (!authorized(request)) return ESP_OK; if (!csrf_authorized(request)) return send_error(request, "403 Forbidden", "Invalid request token"); return door_ota_start() == ESP_OK ? httpd_resp_send(request, "", 0) : send_error(request, "409 Conflict", "No verified update is ready"); }
+
+/* Status polling must work even while TLS leaves little free heap. */
+static esp_err_t send_json_string(httpd_req_t *request, const char *value)
+{
+    /* Largest input is the 127-byte status message; controls expand to 6 bytes. */
+    char json[128 * 6 + 3];
+    size_t used = 0;
+    json[used++] = '"';
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+        if (used + 7 > sizeof(json)) return ESP_ERR_INVALID_SIZE;
+        if (*p < 32) {
+            snprintf(json + used, 7, "\\u%04x", *p);
+            used += 6;
+        } else {
+            if (*p == '"' || *p == '\\') json[used++] = '\\';
+            json[used++] = *p;
+        }
+    }
+    json[used++] = '"';
+    return httpd_resp_send_chunk(request, json, used);
+}
+
+static esp_err_t rfid_status_get(httpd_req_t *request)
+{
+    if (!rfid_authorized(request, false)) return ESP_OK;
+    door_rfid_status_t status;
+    door_rfid_get_status(&status);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    char json[96];
+    int length = snprintf(json, sizeof(json), "{\"ready\":%s,\"enrolling\":%s,\"message\":",
+                          status.ready ? "true" : "false", status.enrolling ? "true" : "false");
+    esp_err_t err = httpd_resp_send_chunk(request, json, length);
+    if (err == ESP_OK) err = send_json_string(request, status.message);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(request, ",\"cards\":[", -1);
+    for (unsigned i = 0; err == ESP_OK && i < status.count; ++i) {
+        length = snprintf(json, sizeof(json), "%s{\"id\":%u,\"pending\":%s,\"name\":",
+                          i ? "," : "", status.cards[i].id, status.cards[i].pending ? "true" : "false");
+        err = httpd_resp_send_chunk(request, json, length);
+        if (err == ESP_OK) err = send_json_string(request, status.cards[i].name);
+        if (err == ESP_OK) err = httpd_resp_send_chunk(request, "}", 1);
+    }
+    if (err == ESP_OK) err = httpd_resp_send_chunk(request, "]}", 2);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(request, NULL, 0);
+    return err;
+}
+
+static esp_err_t rfid_post(httpd_req_t *request)
+{
+    if (!rfid_authorized(request, true)) return ESP_OK;
+    char content_type[48];
+    if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        strcmp(content_type, "application/json") || request->content_len > 256)
+        return send_error(request, "400 Bad Request", "Expected bounded JSON request");
+    char *body = receive_form(request);
+    if (!body) return send_error(request, "400 Bad Request", "Invalid request body");
+    /* Reject embedded NUL/trailing garbage before using the legacy parser. */
+    const char *end = NULL;
+    cJSON *root = memchr(body, 0, request->content_len) ? NULL : cJSON_ParseWithOpts(body, &end, true);
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsObject(root)) {
+        if (!strcmp(request->uri, "/api/rfid/enroll")) {
+            cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "name");
+            if (cJSON_IsString(name) && name->valuestring) err = door_rfid_enroll(name->valuestring);
+        } else if (!strcmp(request->uri, "/api/rfid/delete")) {
+            cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+            if (cJSON_IsNumber(id) && id->valuedouble >= 1 && id->valuedouble <= DOOR_RFID_MAX_CARDS &&
+                id->valuedouble == id->valueint) err = door_rfid_delete(id->valueint);
+        } else if (!strcmp(request->uri, "/api/rfid/cancel")) err = door_rfid_cancel();
+    }
+    cJSON_Delete(root);
+    free(body);
+    if (err == ESP_OK) return httpd_resp_send(request, "", 0);
+    return send_error(request, err == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "409 Conflict",
+                      "Card operation failed; check name, reader status, capacity, and storage");
+}
 
 static esp_err_t captive_redirect_get(httpd_req_t *request)
 {
@@ -201,9 +318,16 @@ static esp_err_t captive_redirect_get(httpd_req_t *request)
 
 esp_err_t door_web_start(void)
 {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.stack_size = 6144; config.max_uri_handlers = 12; httpd_handle_t server = NULL;
+    uint8_t random[16];
+    esp_fill_random(random, sizeof(random));
+    for (unsigned i = 0; i < sizeof(random); ++i) snprintf(s_csrf + i * 2, 3, "%02x", random[i]);
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.stack_size = 6144; config.max_uri_handlers = 16; httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config); if (err != ESP_OK) { ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err)); return err; }
     const httpd_uri_t routes[] = {
+        { .uri = "/api/rfid/status", .method = HTTP_GET, .handler = rfid_status_get },
+        { .uri = "/api/rfid/enroll", .method = HTTP_POST, .handler = rfid_post },
+        { .uri = "/api/rfid/delete", .method = HTTP_POST, .handler = rfid_post },
+        { .uri = "/api/rfid/cancel", .method = HTTP_POST, .handler = rfid_post },
         { .uri = "/", .method = HTTP_GET, .handler = root_get }, { .uri = "/api/config", .method = HTTP_POST, .handler = config_post },
         { .uri = "/api/ota/status", .method = HTTP_GET, .handler = ota_status_get }, { .uri = "/api/ota/check", .method = HTTP_POST, .handler = ota_check_post },
         { .uri = "/api/ota/start", .method = HTTP_POST, .handler = ota_start_post },

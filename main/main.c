@@ -2,6 +2,7 @@
 #include "door_config.h"
 #include "door_control.h"
 #include "door_socket.h"
+#include "door_rfid.h"
 #include "door_web.h"
 #include "door_wifi.h"
 #include "driver/gpio.h"
@@ -31,6 +32,13 @@ static void factory_reset_task(void *unused)
         if (gpio_get_level(FACTORY_RESET_GPIO) == 0) {
             if (++held_ticks == 1) ESP_LOGW(TAG, "Hold GPIO 0 for 5 seconds to erase configuration");
             if (held_ticks >= 50) {
+                esp_err_t err = door_rfid_erase();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Card reset failed: %s", esp_err_to_name(err));
+                    held_ticks = 0;
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    continue;
+                }
                 ESP_ERROR_CHECK(door_config_erase());
                 ESP_LOGW(TAG, "Configuration erased; restarting in setup mode");
                 vTaskDelay(pdMS_TO_TICKS(500));
@@ -56,6 +64,8 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     ESP_ERROR_CHECK(door_config_init());
+    err = door_rfid_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "RFID unavailable: %s", esp_err_to_name(err));
     ESP_ERROR_CHECK(door_wifi_start());
     if (!door_config_is_provisioned()) ESP_ERROR_CHECK(door_captive_start());
     ESP_ERROR_CHECK(door_web_start());

@@ -292,3 +292,139 @@ lock disconnected throughout these checks.
   limiting on the WebSocket server as well as on the device.
 - NVS stores Wi-Fi and server credentials in recoverable form unless flash/NVS
   encryption is enabled and supported by the chosen ESP8266 deployment.
+
+## RC522 cards (MIFARE Classic 1K)
+
+Card scans open the door without a phone or PIN. The LAN panel can enroll and
+remove up to 16 named cards, including names such as `Ali's card`. Enrollment
+requires a provisioned device and a panel password; sign in as `admin`. This
+password protects administration only, not ordinary card scans.
+
+**Security limitation:** Classic 1K's Crypto1 remains vulnerable to key recovery
+and cloning. This firmware does not authorize by UID alone: it authenticates
+sector 7 using a random per-card 48-bit Key A, reads a random 128-bit credential
+from block 28, and compares it against the stored credential. UID only selects
+the expected record/key. Copying only the UID or presenting a factory-key card
+cannot pass those checks. Copying the UID, recovered key, and credential can
+still open the door. This is not AES authentication or clone-resistant access.
+NVS contains recoverable card keys/credentials; protect physical access to the
+controller. The HTTP panel also requires a trusted LAN; Basic authentication
+does not encrypt its password in transit. Do not forward its port to the internet.
+
+### Wiring to ESP8266 / ESP-12F
+
+Disconnect power and the door lock before wiring. Use GPIO numbers, not board
+labels such as D1/D2. The firmware uses software SPI because hardware HSPI MISO
+is GPIO 12, already used by the relay. Do not connect RC522 MISO to GPIO 12.
+
+| RC522 pin | ESP8266 connection |
+| --- | --- |
+| 3.3V | Regulated 3.3 V |
+| GND | Common GND |
+| SCK | GPIO 14 (D5 on NodeMCU) |
+| MOSI | GPIO 13 (D7 on NodeMCU) |
+| MISO | GPIO 4 (D2 on NodeMCU) |
+| SDA / SS | GPIO 5 (D1 on NodeMCU), SPI chip select, not I2C SDA |
+| RST | 3.3 V; firmware uses RC522 software reset |
+| IRQ | Unconnected |
+
+Use 3.3 V power and logic only; never connect RC522 to 5 V. Put a 10 kOhm
+pull-up between SS and 3.3 V, and 100 nF plus 10 uF decoupling near the reader.
+Keep SPI wires short, ideally under 20 cm. Ensure the 3.3 V regulator can power
+both ESP8266 Wi-Fi bursts and RC522. GPIO 0 reset button, GPIO 2 status LED,
+GPIO 12 relay, and boot strap pins keep their existing functions. On a bare
+ESP8266, retain its usual EN/reset/boot strap resistors and external relay
+pull-down; these connections do not replace them.
+
+### Build, enroll, and delete
+
+1. Disconnect the lock; build and flash through USB using the legacy SDK:
+
+   ```sh
+   esp-lagecy
+   idf.py build
+   python3 tests/check_rfid.py
+   python3 tests/check_ota_safety.py
+   idf.py -p /dev/ttyUSB0 flash monitor
+   ```
+
+2. Look for `RC522 ready (version 91)` or `RC522 ready (version 92)` in the
+   serial log. If reader detection fails, existing web/server features still
+   work, but card opening is disabled. Correct wiring and restart. Some clones
+   report other chip versions; firmware currently rejects those versions.
+
+3. Provision Wi-Fi if necessary, set a panel password, save/reboot, and sign in
+   through the device's LAN address as `admin`. Under **RFID cards**, enter
+   `Ali's card`, choose **Enroll next card**, confirm, and present one dedicated
+   Classic 1K card within 60 seconds. Keep it still until the panel reports
+   successful enrollment. Enrollment itself never opens the door.
+
+4. Remove the card fully from the RF field, then present it again. Expect one
+   300 ms active-high pulse on GPIO 12 and `Authenticated card opened door` in
+   the serial log. Keeping a successfully read card in the field should not
+   repeatedly open the door; remove it before another scan.
+
+5. Choose **Delete** next to the name and confirm. Access is revoked and the
+   name disappears. Card presence is not needed for deletion; card contents
+   are not reset. Unplug/restart the ESP8266 and verify the deleted card still
+   cannot open the door.
+
+**Enrollment changes sector 7 only:** block 28 receives the credential; trailer
+31 receives random keys and transport access conditions `FF 07 80`. Blocks 29
+and 30 stay untouched. Sector 0/manufacturer UID and all other sectors stay
+untouched. New cards must have factory Key A `FF FF FF FF FF FF` and sector 7
+transport access conditions. Never enroll payment, transit, work-access, or
+other cards whose existing data/keys matter.
+
+Keys are saved before card writes, and access is granted only after card
+read-back and NVS commit succeed. Interrupted enrollment stays **pending** and
+cannot open the door. Start enrollment again with the same card/name to recover;
+keep other cards away during recovery. **Cancel enrollment** stops the window;
+it does not restore card data or remove pending records.
+
+Deleted records retain revoked keys internally so the same card can be
+re-enrolled while its slot has not been reused. When no empty slots remain,
+enrolling a different card can reuse a revoked slot and discard those old keys.
+Factory reset removes all card records and keys, as well as normal configuration.
+Neither deletion nor reset restores factory keys on the physical card. Once its
+keys are discarded, that card cannot be enrolled again by this firmware; use a
+fresh card, or restore sector 7 with an external tool and previously saved keys.
+Normal OTA updates preserve card records. Card storage has its own versioned
+`rfid/cards` NVS blob; existing version-5 Wi-Fi/panel config and partitions are
+unchanged. Browser configuration forms and OTA/card mutation requests now
+require a per-boot CSRF token; reload old panel tabs after updating. Direct API
+clients must read the token from the authenticated panel and send it as
+`X-Door-CSRF` for OTA/card POSTs (or `csrf` form field for configuration).
+
+### Device acceptance tests
+
+Keep the lock disconnected throughout these checks; reconnect only after
+polarity, startup safety, and pulse timing are verified with an LED/meter/scope.
+
+- Enroll two cards with different names. Confirm both open once per presentation,
+  names survive reboot, and deleted cards remain denied after reboot.
+- Present an unregistered card, a card with only a copied UID, and (using an
+  external test tool) an enrolled UID with a wrong sector 7 key or wrong block
+  28 credential. None may pulse GPIO 12. A full Crypto1 clone remains a known
+  limitation and is not expected to be rejected.
+- Hold a valid card against the reader for 10 seconds; expect one pulse. Remove
+  and re-present it; expect another. Trigger a server open while scanning;
+  overlapping pulses must be rejected rather than extending relay activation.
+- Disconnect Wi-Fi after enrollment; local card opening should continue. Verify
+  Wi-Fi/server reconnects and authenticated WebSocket opening afterward.
+- Cancel an enrollment, let another expire for 60 seconds, and scan a new card;
+  it must stay denied. Try empty/oversized names, malformed JSON, missing login,
+  and missing `X-Door-CSRF` headers; card management must reject them.
+- Interrupt power during enrollment with a disposable card. After restart,
+  verify any pending card is denied; re-enroll to recover. Denial is preferable
+  to accidentally granting access after an incomplete write.
+- Boot with reader disconnected and with a card present. Verify no unintended
+  relay pulse and continued web/server operation. Verify GPIO 0 factory reset
+  revokes every card and restarts provisioning. Reset discards keys permanently.
+- Recheck provisioning, relay timing, and signed OTA rejection/updates in both
+  OTA slots. Watch heap/stack behavior during concurrent card scans and TLS OTA;
+  these hardware checks cannot be established by host tests or compilation.
+
+For the later hardware upgrade, PN532 alone does not fix Classic 1K security.
+Use DESFire EV2/EV3 cards plus a new driver and correctly implemented AES mutual
+authentication. Existing Classic credentials do not migrate into DESFire keys.
