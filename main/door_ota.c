@@ -23,6 +23,7 @@
 #define OTA_SIGNATURE_URL "https://github.com/satayyeb/smart-door-opener/releases/latest/download/manifest.json.sig"
 #define OTA_RELEASE_PREFIX "https://github.com/satayyeb/smart-door-opener/releases/"
 #define OTA_METADATA_MAX 2048
+#define OTA_RANGE_SIZE 4096
 
 static SemaphoreHandle_t s_lock;
 static volatile bool s_remote_update_pending;
@@ -80,7 +81,7 @@ static int open_download(esp_http_client_handle_t client)
         int length = esp_http_client_fetch_headers(client);
         if (length < 0) return -1;
         int status = esp_http_client_get_status_code(client);
-        if (status == 200) return length;
+        if (status == 200 || status == 206) return length;
         if (redirects == 5 || (status != 301 && status != 302 && status != 303 &&
                               status != 307 && status != 308)) {
             ESP_LOGW("door_ota", "Download rejected HTTP status %d", status);
@@ -101,7 +102,7 @@ static int download(const char *url, uint8_t *buffer, size_t capacity)
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return -1;
     int length = open_download(client);
-    if (length < 0) {
+    if (length < 0 || esp_http_client_get_status_code(client) != 200) {
         esp_http_client_cleanup(client);
         return -1;
     }
@@ -213,14 +214,50 @@ static bool image_mapping_valid(const esp_partition_t *partition)
     return true;
 }
 
+typedef struct {
+    unsigned start, end, total;
+    bool valid;
+} download_range_t;
+
+static esp_err_t range_header(esp_http_client_event_t *event)
+{
+    if (event->event_id == HTTP_EVENT_ON_HEADER && !strcasecmp(event->header_key, "Content-Range")) {
+        download_range_t *range = event->user_data;
+        char extra;
+        range->valid = sscanf(event->header_value, "bytes %u-%u/%u%c",
+                              &range->start, &range->end, &range->total, &extra) == 3 &&
+                       range->start <= range->end && range->end < range->total;
+    }
+    return ESP_OK;
+}
+
+static int open_range(esp_http_client_handle_t client, download_range_t *range,
+                      unsigned offset, unsigned expected_total, unsigned capacity)
+{
+    unsigned end = offset + OTA_RANGE_SIZE - 1;
+    char header[48];
+    snprintf(header, sizeof(header), "bytes=%u-%u", offset, end);
+    range->valid = false;
+    if (esp_http_client_set_header(client, "Range", header) != ESP_OK) return -1;
+    int length = open_download(client);
+    if (esp_http_client_get_status_code(client) != 206 || !range->valid ||
+        range->start != offset || range->total > capacity ||
+        (expected_total && range->total != expected_total)) return -1;
+    unsigned expected_end = range->total - 1 < end ? range->total - 1 : end;
+    if (range->end != expected_end || length != (int)(range->end - range->start + 1)) return -1;
+    return length;
+}
+
 static void update_now(void)
 {
     if (door_socket_pause_for_ota() != ESP_OK) {
         set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection for a safe update.");
         return;
     }
+    download_range_t range = {0};
     esp_http_client_config_t config = { .url = s_firmware_url, .cert_pem = (const char *)server_root_ca_start,
-                                        .timeout_ms = 15000, .buffer_size = 512, .buffer_size_tx = 2048 };
+                                        .timeout_ms = 15000, .buffer_size = 512, .buffer_size_tx = 2048,
+                                        .event_handler = range_header, .user_data = &range };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
     esp_ota_handle_t handle = 0;
@@ -230,15 +267,20 @@ static void update_now(void)
     if (mbedtls_sha256_starts_ret(&sha, 0) != 0) goto failed;
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!client || !partition || !running || partition->address == running->address) goto failed;
-    int length = open_download(client);
-    if (esp_http_client_get_status_code(client) != 200 || length <= 0 || (size_t)length > partition->size ||
-        esp_ota_begin(partition, length, &handle) != ESP_OK) goto failed;
+    int part_length = open_range(client, &range, 0, 0, partition->size);
+    if (part_length <= 0) goto failed;
+    int length = range.total;
+    if (esp_ota_begin(partition, length, &handle) != ESP_OK) goto failed;
     begun = true;
     uint8_t buffer[2048]; int total = 0;
     while (total < length) {
-        int remaining = length - total;
-        int count = esp_http_client_read(client, (char *)buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer));
-        if (count <= 0 || count > remaining || esp_ota_write(handle, buffer, count) != ESP_OK) goto failed;
+        if (part_length == 0) {
+            part_length = open_range(client, &range, total, length, partition->size);
+            if (part_length <= 0) goto failed;
+        }
+        int count = esp_http_client_read(client, (char *)buffer, part_length < sizeof(buffer) ? part_length : sizeof(buffer));
+        if (count <= 0 || count > part_length || esp_ota_write(handle, buffer, count) != ESP_OK) goto failed;
+        part_length -= count;
         if (mbedtls_sha256_update_ret(&sha, buffer, count) != 0) goto failed;
         total += count;
         set_status(DOOR_OTA_DOWNLOADING, (unsigned)((uint64_t)total * 100 / length), "Downloading signed firmware...");
@@ -247,11 +289,13 @@ static void update_now(void)
     uint8_t actual[32];
     if (total != length || mbedtls_sha256_finish_ret(&sha, actual) != 0 ||
         memcmp(actual, s_expected_sha256, sizeof(actual))) goto failed;
+    esp_http_client_cleanup(client);
+    client = NULL;
     esp_err_t end_result = esp_ota_end(handle);
     begun = false;
     if (end_result != ESP_OK || !image_mapping_valid(partition)) goto failed;
     if (esp_ota_set_boot_partition(partition) != ESP_OK) goto failed;
-    esp_http_client_close(client); esp_http_client_cleanup(client); mbedtls_sha256_free(&sha);
+    mbedtls_sha256_free(&sha);
     set_status(DOOR_OTA_READY, 100, "Verified. Restarting into the new firmware...");
     vTaskDelay(pdMS_TO_TICKS(1500)); esp_restart();
 failed:

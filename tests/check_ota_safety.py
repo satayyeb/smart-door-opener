@@ -6,7 +6,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'main/door_ota.c').read_text()
-helper = source[source.index('static bool image_mapping_valid('):source.index('static void update_now(')]
+helper = source[source.index('static bool image_mapping_valid('):source.index('typedef struct {', source.index('static bool image_mapping_valid('))]
 stub = r'''
 #include <assert.h>
 #include <stdbool.h>

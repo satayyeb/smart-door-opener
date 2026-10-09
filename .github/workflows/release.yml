@@ -38,6 +38,7 @@ jobs:
           idf.py -D PROJECT_VER="$VERSION" build
           python tests/check_http_headers.py
           python tests/check_ota_remote.py
+          python tests/check_ota_ranges.py
           python tests/check_ota_redirects.py
           python tests/check_ota_safety.py
           cp build/smart-door-opener.bin smart-door-opener.bin
