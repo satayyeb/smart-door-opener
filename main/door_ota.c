@@ -23,10 +23,11 @@
 #define OTA_SIGNATURE_URL "https://github.com/satayyeb/smart-door-opener/releases/latest/download/manifest.json.sig"
 #define OTA_RELEASE_PREFIX "https://github.com/satayyeb/smart-door-opener/releases/"
 #define OTA_METADATA_MAX 2048
-#define OTA_TASK_STACK_SIZE 8192
 
 static SemaphoreHandle_t s_lock;
-static bool s_remote_update_pending;
+static volatile bool s_remote_update_pending;
+static volatile bool s_check_pending;
+static volatile bool s_install_pending;
 static door_ota_status_t s_status = { .state = DOOR_OTA_IDLE, .current_version = FIRMWARE_VERSION };
 static char s_firmware_url[512];
 static uint8_t s_expected_sha256[32];
@@ -74,6 +75,7 @@ static int open_download(esp_http_client_handle_t client)
             if (added < 0 || (size_t)added >= sizeof(url) - length ||
                 esp_http_client_set_url(client, url) != ESP_OK) return -1;
         }
+        ESP_LOGI("door_ota", "HTTPS hop %d: free heap %u", redirects, (unsigned)esp_get_free_heap_size());
         if (esp_http_client_open(client, 0) != ESP_OK) return -1;
         int length = esp_http_client_fetch_headers(client);
         if (length < 0) return -1;
@@ -160,7 +162,7 @@ static esp_err_t check_now(void)
     uint8_t *signature = malloc(512);
     if (!manifest || !signature) { free(manifest); free(signature); return ESP_ERR_NO_MEM; }
     int manifest_length = download(OTA_MANIFEST_URL, manifest, OTA_METADATA_MAX);
-    int signature_length = download(OTA_SIGNATURE_URL, signature, 512);
+    int signature_length = manifest_length > 0 ? download(OTA_SIGNATURE_URL, signature, 512) : -1;
     if (manifest_length <= 0 || signature_length <= 0 ||
         !verify_manifest(manifest, manifest_length, signature, signature_length)) {
         free(manifest); free(signature); return ESP_ERR_INVALID_CRC;
@@ -186,26 +188,13 @@ static esp_err_t check_now(void)
     return ESP_OK;
 }
 
-static void check_task(void *unused)
-{
-    (void)unused;
-    esp_err_t err = door_socket_pause_for_ota();
-    if (err == ESP_OK) err = check_now();
-    door_socket_resume_after_ota();
-    if (err != ESP_OK) set_status(DOOR_OTA_ERROR, 0, "Could not verify the signed update manifest.");
-    vTaskDelete(NULL);
-}
-
 esp_err_t door_ota_check(void)
 {
     door_ota_status_t status; door_ota_get_status(&status);
     if (status.state == DOOR_OTA_CHECKING || status.state == DOOR_OTA_DOWNLOADING || status.state == DOOR_OTA_VERIFYING) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_CHECKING, 0, "Checking GitHub for signed updates...");
-    esp_err_t err = door_socket_pause_for_ota();
-    if (err != ESP_OK) { set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection."); return err; }
-    if (xTaskCreate(check_task, "ota_check", OTA_TASK_STACK_SIZE, NULL, 3, NULL) != pdPASS) {
-        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
-    }
+    door_socket_request_ota_pause();
+    s_check_pending = true;
     return ESP_OK;
 }
 
@@ -274,33 +263,31 @@ failed:
     set_status(DOOR_OTA_ERROR, 0, "Firmware download or verification failed; the current image remains active.");
 }
 
-static void update_task(void *unused)
-{
-    (void)unused;
-    update_now();
-    vTaskDelete(NULL);
-}
-
 esp_err_t door_ota_start(void)
 {
     door_ota_status_t status; door_ota_get_status(&status);
     if (status.state != DOOR_OTA_AVAILABLE || !s_firmware_url[0]) return ESP_ERR_INVALID_STATE;
     set_status(DOOR_OTA_DOWNLOADING, 0, "Starting firmware download...");
-    esp_err_t err = door_socket_pause_for_ota();
-    if (err != ESP_OK) { set_status(DOOR_OTA_ERROR, 0, "Could not pause the server connection."); return err; }
-    if (xTaskCreate(update_task, "ota_update", OTA_TASK_STACK_SIZE, NULL, 4, NULL) != pdPASS) {
-        door_socket_resume_after_ota(); return ESP_ERR_NO_MEM;
-    }
+    door_socket_request_ota_pause();
+    s_install_pending = true;
     return ESP_OK;
 }
 
 void door_ota_run_pending_remote_update(void)
 {
-    if (!s_remote_update_pending) return;
+    if (s_install_pending) {
+        s_install_pending = false;
+        update_now();
+        door_socket_resume_after_ota();
+        return;
+    }
+    if (!s_remote_update_pending && !s_check_pending) return;
+    bool install = s_remote_update_pending;
+    s_check_pending = false;
     s_remote_update_pending = false;
     esp_err_t err = door_socket_pause_for_ota();
     if (err == ESP_OK) err = check_now();
-    if (err == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_now();
+    if (install && err == ESP_OK && s_status.state == DOOR_OTA_AVAILABLE) update_now();
     door_socket_resume_after_ota();
     if (err != ESP_OK && s_status.state != DOOR_OTA_UP_TO_DATE)
         set_status(DOOR_OTA_ERROR, 0, "Remote update check or verification failed.");

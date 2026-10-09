@@ -5,14 +5,16 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'main/door_ota.c').read_text()
-helper = source[source.index('void door_ota_run_pending_remote_update('):]
+helper = (source[source.index('esp_err_t door_ota_check('):source.index('/* ESP8266 cache')]
+          + source[source.index('esp_err_t door_ota_start('):])
 stub = r'''
 #include <assert.h>
 #include <stdbool.h>
 #define ESP_OK 0
 #define ESP_ERR_INVALID_STATE 1
 #include "door_ota.h"
-static bool s_remote_update_pending, paused;
+static bool s_remote_update_pending, s_check_pending, s_install_pending, paused;
+static char s_firmware_url[512] = "https://github.com/firmware";
 static door_ota_status_t s_status;
 static int checks, updates, check_error, pause_error;
 static void door_ota_get_status_stub(door_ota_status_t *s) { *s = s_status; }
@@ -42,10 +44,18 @@ int main(void) {
     assert(door_ota_update_latest() == ESP_OK);
     door_ota_run_pending_remote_update();
     assert(!paused && checks == 2 && updates == 1 && s_status.state == DOOR_OTA_ERROR);
+    check_error = 0;
+    assert(door_ota_check() == ESP_OK);
+    door_ota_run_pending_remote_update();
+    assert(!paused && checks == 3 && updates == 1 && s_status.state == DOOR_OTA_AVAILABLE);
+    assert(door_ota_start() == ESP_OK);
+    assert(paused && updates == 1);
+    door_ota_run_pending_remote_update();
+    assert(!paused && checks == 3 && updates == 2);
     pause_error = -1;
     assert(door_ota_update_latest() == ESP_OK);
     door_ota_run_pending_remote_update();
-    assert(!paused && checks == 2 && updates == 1 && s_status.state == DOOR_OTA_ERROR);
+    assert(!paused && checks == 3 && updates == 2 && s_status.state == DOOR_OTA_ERROR);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

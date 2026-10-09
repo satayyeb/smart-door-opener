@@ -17,6 +17,7 @@ static unsigned esp_random(void) { return 123; }
 #define ESP_OK 0
 #define HTTP_TRANSPORT_OVER_SSL 2
 #define ESP_LOGW(...) ((void)0)
+#define ESP_LOGI(...) ((void)0)
 typedef struct {
     int statuses[8], index, opens, closes;
     int open_error, header_error, redirect_error, insecure;
