@@ -63,7 +63,17 @@ const char *door_ota_state_name(door_ota_state_t state)
 /* Streaming HTTP calls do not follow redirects automatically in SDK v3.4. */
 static int open_download(esp_http_client_handle_t client)
 {
+    if (esp_http_client_set_header(client, "Cache-Control", "no-cache") != ESP_OK) return -1;
     for (int redirects = 0; redirects <= 5; ++redirects) {
+        char url[sizeof(s_firmware_url) + 48];
+        if (esp_http_client_get_url(client, url, sizeof(url)) != ESP_OK) return -1;
+        /* Bust cached GitHub redirects, never modify the signed asset URL. */
+        if (!strncmp(url, OTA_RELEASE_PREFIX, sizeof(OTA_RELEASE_PREFIX) - 1)) {
+            size_t length = strlen(url);
+            int added = snprintf(url + length, sizeof(url) - length, "?ota=%lu", (unsigned long)esp_random());
+            if (added < 0 || (size_t)added >= sizeof(url) - length ||
+                esp_http_client_set_url(client, url) != ESP_OK) return -1;
+        }
         if (esp_http_client_open(client, 0) != ESP_OK) return -1;
         int length = esp_http_client_fetch_headers(client);
         if (length < 0) return -1;
